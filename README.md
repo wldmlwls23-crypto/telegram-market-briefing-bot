@@ -2,14 +2,17 @@
 
 비개발자도 Railway에 바로 배포할 수 있는 Python 텔레그램 자동 시장 브리핑 봇입니다.
 
-이 봇은 Railway에서 24시간 켜진 worker로 실행되며, 매일 한국시간 기준 `06:50`, `12:00`, `18:00`, `23:30`에 시장 브리핑을 텔레그램으로 보냅니다.
+이 봇은 Railway에서 24시간 켜진 worker로 실행되며, 한국장/유럽장/미국장 세션 기준으로 시장 브리핑을 텔레그램으로 보냅니다.
 
 ## 기능
 
 - Telegram Bot API `sendMessage`로 텔레그램 전송
 - OpenAI API로 뉴스와 시장 데이터를 요약
 - `.env` 또는 Railway Variables로 환경변수 관리
-- APScheduler로 한국시간 예약 실행
+- APScheduler로 한국장, 유럽장, 미국장 세션 기준 예약 실행
+- 중요도 ★★★★★ 뉴스와 이벤트 긴급 알림
+- 예정된 ★★★★★ 이벤트 6시간 전 사전 알림
+- `sent_alerts.json` 기반 중복 알림 방지
 - Railway 자동 배포 지원
 - 오류 발생 시 텔레그램으로 오류 메시지 전송
 
@@ -177,12 +180,17 @@ RUN_ON_START=false
 ## 8. 24시간 동작 방식
 
 Railway는 `python main.py`를 계속 실행합니다.
-`main.py` 안의 APScheduler가 한국시간 기준으로 아래 시간마다 브리핑을 보냅니다.
+`main.py` 안의 APScheduler가 아래 시간마다 브리핑을 보냅니다.
 
-- 06:50
-- 12:00
-- 18:00
-- 23:30
+- 06:50 KST - Morning Market Report
+- 08:00 KST - Korea Pre-Market
+- 16:00 KST - Korea Close Recap
+- 08:00 Europe/Paris - Europe Pre-Market
+- 18:00 Europe/Paris - Europe Close Recap
+- 08:30 America/New_York - US Pre-Market
+- 16:30 America/New_York - US Close Recap
+
+유럽장과 미국장 스케줄은 코드에서 `Europe/Paris`, `America/New_York` 시간대를 사용하므로 서머타임을 자동 반영합니다.
 
 프로그램이 오류로 종료되면 `railway.json` 설정에 따라 Railway가 다시 시작을 시도합니다.
 
@@ -208,14 +216,21 @@ RUN_ON_START=false
 
 ## 10. 브리핑 형식
 
-텔레그램 메시지는 아래 형식으로 전송됩니다.
+06:50 Morning Market Report는 아래 고정 형식으로 전송됩니다.
 
 ```text
-[Signal vs Noise]
-[Economic Calendar]
-[Crypto / Macro / Stocks]
-[오늘 중요한 것]
+# Morning Market Report
+## 0. [Current Asset Snapshot]
+## 1. [Signal vs Noise]
+## 2. [Economic Calendar]
+## 3. [Market Pulse]
+## 4. [Indicator Sensitivity]
+## 5. [Today’s Priority]
 ```
+
+다른 정규 리포트는 Korea Pre-Market, Korea Close Recap, Europe Pre-Market, Europe Close Recap, US Pre-Market, US Close Recap 성격에 맞춰 작성됩니다.
+
+중요도 ★★★★★ 뉴스는 정규 시간 외에도 `[긴급 시장 알림 | ★★★★★]` 형식으로 전송됩니다.
 
 ## 11. 자주 생기는 문제
 
