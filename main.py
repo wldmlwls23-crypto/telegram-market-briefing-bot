@@ -228,13 +228,10 @@ EVENT_FIVE_TERMS = {
     "consumer price",
     "pce",
     "core pce",
-    "fomc",
     "federal funds rate",
     "fed interest rate decision",
     "fed chair powell",
     "nonfarm payrolls",
-    "unemployment rate",
-    "employment change",
     "jobs report",
 }
 
@@ -253,6 +250,45 @@ EVENT_FOUR_TERMS = {
     "bOK",
     "exports",
     "imports",
+}
+
+COUNTRY_KOREAN_NAMES = {
+    "USD": "미국",
+    "KRW": "한국",
+    "CNY": "중국",
+    "EUR": "유로존",
+    "JPY": "일본",
+    "GBP": "영국",
+    "AUD": "호주",
+    "CAD": "캐나다",
+    "CHF": "스위스",
+    "NZD": "뉴질랜드",
+}
+
+EVENT_TITLE_KOREAN_HINTS = {
+    "core pce price index": "근원 PCE 물가",
+    "pce price index": "PCE 물가",
+    "consumer price index": "소비자물가지수(CPI)",
+    "cpi": "소비자물가지수(CPI)",
+    "non-farm employment change": "비농업 고용 변화",
+    "nonfarm payrolls": "비농업 고용지표",
+    "unemployment claims": "신규 실업수당 청구",
+    "jobless claims": "신규 실업수당 청구",
+    "unemployment rate": "실업률",
+    "employment change": "고용 변화",
+    "final gdp": "GDP 확정치",
+    "advance gdp": "GDP 속보치",
+    "gdp price index": "GDP 물가지수",
+    "ism manufacturing pmi": "ISM 제조업 PMI",
+    "ism services pmi": "ISM 서비스업 PMI",
+    "manufacturing pmi": "제조업 PMI",
+    "services pmi": "서비스업 PMI",
+    "fomc statement": "FOMC 성명",
+    "federal funds rate": "미국 기준금리 결정",
+    "fed chair powell speaks": "파월 Fed 의장 발언",
+    "treasury auction": "미국채 입찰",
+    "retail sales": "소매판매",
+    "ppi": "생산자물가지수(PPI)",
 }
 
 
@@ -293,6 +329,22 @@ def normalize_text(value: str) -> str:
 def contains_any(text: str, terms: set[str]) -> bool:
     normalized = normalize_text(text)
     return any(term.lower() in normalized for term in terms)
+
+
+def country_label(country: str) -> str:
+    return COUNTRY_KOREAN_NAMES.get(country.upper(), country)
+
+
+def korean_event_title(title: str) -> str:
+    normalized = normalize_text(title)
+    for key, value in EVENT_TITLE_KOREAN_HINTS.items():
+        if key in normalized:
+            return value
+    return title
+
+
+def is_core_market_country(country: str) -> bool:
+    return country.upper() in {"USD", "KRW", "CNY", "EUR", "JPY"}
 
 
 def stable_key(*parts: str) -> str:
@@ -409,15 +461,20 @@ def fetch_major_indices() -> list[dict[str, str]]:
 
 def classify_event(event: dict[str, Any]) -> dict[str, str]:
     title = str(event.get("title", ""))
-    country = str(event.get("country", ""))
+    country = str(event.get("country", "")).upper()
     impact = str(event.get("impact", ""))
     combined = f"{country} {title} {impact}"
 
-    if contains_any(combined, EVENT_FIVE_TERMS):
+    if country == "USD" and contains_any(combined, EVENT_FIVE_TERMS):
         stars = "★★★★★"
-    elif impact == "High" or contains_any(combined, EVENT_FOUR_TERMS):
+    elif (
+        is_core_market_country(country)
+        and (impact == "High" or contains_any(combined, EVENT_FOUR_TERMS))
+    ):
         stars = "★★★★"
-    elif impact == "Medium":
+    elif is_core_market_country(country) and impact == "Medium":
+        stars = "★★★"
+    elif country in {"AUD", "CAD", "GBP", "CHF", "NZD"} and contains_any(combined, {"rate decision", "cpi", "gdp", "pmi"}):
         stars = "★★★"
     else:
         stars = "exclude"
@@ -469,7 +526,9 @@ def fetch_economic_calendar(days_ahead: int = 1) -> list[dict[str, str]]:
             {
                 "time_kst": event_dt.strftime("%Y-%m-%d %H:%M"),
                 "country": str(event.get("country", "")),
+                "country_ko": country_label(str(event.get("country", ""))),
                 "title": str(event.get("title", "")),
+                "title_ko": korean_event_title(str(event.get("title", ""))),
                 "importance": classification["stars"],
                 "sensitivity": classification["sensitivity"],
                 "forecast": str(event.get("forecast", "")),
@@ -551,6 +610,13 @@ def common_writing_rules() -> str:
 공통 작성 원칙:
 - 한국어로 작성
 - 짧고 쉬운 문장 사용
+- Telegram 모바일에서 읽기 쉽게 작성
+- 마크다운 표 사용 금지
+- 파이프 문자 | 사용 금지
+- 긴 가로줄, 정렬용 하이픈 줄, 표 헤더 금지
+- 각 항목은 "- BTC: 내용"처럼 한 줄 bullet로 작성
+- N/A가 많은 항목을 억지로 나열하지 말 것
+- 값이 없는 자산은 생략하거나, 꼭 필요할 때만 "값 확인 필요"라고 짧게 작성
 - 뉴스 나열 금지, 핵심 변수만 정리
 - 실제 발생한 뉴스, 공식 경제지표, 주요 시장 데이터만 사용
 - 전문가 개인 전망, SNS 노이즈, 알트코인 홍보, 가격 목표가 제외
@@ -578,19 +644,32 @@ def report_prompt(report_type: str) -> str:
 반드시 아래 제목과 섹션을 그대로 사용하세요.
 
 ## 0. [Current Asset Snapshot]
-BTC, ETH, Nasdaq, DXY, 미국 2년물/10년물 금리, KOSPI, 유가, 금 중 오늘 중요한 것만 표로 요약하세요.
+BTC, ETH, Nasdaq, DXY, 미국 2년물/10년물 금리, KOSPI, 유가, 금 중 오늘 중요한 것만 bullet로 요약하세요.
+원자료에 값이 없는 자산은 억지로 쓰지 마세요.
+예:
+- BTC: 00,000달러, 24시간 -0.0%. 위험자산 압력 확인.
+- DXY: 값 확인 필요. 달러 방향은 BTC와 Nasdaq 압력 판단에 중요.
 
 ## 1. [Signal vs Noise]
 오늘 시장에서 실제로 중요한 핵심 신호 2~4개만 정리하세요.
 
 ## 2. [Economic Calendar]
-앞으로 24시간 안의 중요한 일정만 표로 정리하세요. 중요도 낮은 일정은 제외하세요.
+앞으로 24시간 안의 중요한 일정만 bullet로 정리하세요. 중요도 낮은 일정은 제외하세요.
+영어 지표명을 그대로 쓰지 말고 title_ko와 country_ko를 우선 사용하세요.
+예:
+- 21:30 KST / 미국 / 근원 PCE 물가 / ★★★★★
+  관찰: 높으면 인플레 부담·달러/금리 상승 압력, 낮으면 달러 약세 압력.
 
 ## 3. [Market Pulse]
-Crypto, Dollar, Rates, Nasdaq, KOSPI, Oil/Gold 중 중요한 것만 표로 요약하세요.
+Crypto, Dollar, Rates, Nasdaq, KOSPI, Oil/Gold 중 중요한 것만 bullet로 요약하세요.
 
 ## 4. [Indicator Sensitivity]
-오늘 주요 지표가 강하게/약하게 나올 때 달러, 금리, Nasdaq, BTC에 생기는 압력을 표로 정리하세요.
+오늘 주요 지표 2~4개만 bullet로 정리하세요.
+"강하게 나오면/약하게 나오면"은 지표별로 바로 붙여서 쓰세요.
+예:
+- 근원 PCE 물가:
+  강하게 나오면: 인플레 부담, 달러·금리 상승 압력.
+  약하게 나오면: 인플레 부담 완화, 달러 약세 압력.
 
 ## 5. [Today’s Priority]
 오늘 확인할 우선순위 3~5개만 번호로 정리하세요.
@@ -667,7 +746,28 @@ def create_briefing(market_data: dict[str, Any], report_type: str = "morning") -
     content = response.choices[0].message.content
     if not content:
         raise RuntimeError("OpenAI returned an empty response.")
-    return content.strip()
+    return clean_for_telegram(content.strip())
+
+
+def clean_for_telegram(text: str) -> str:
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+        if stripped.startswith("|") and set(stripped.replace("|", "").replace(":", "").strip()) <= {"-"}:
+            continue
+        if "|" in stripped:
+            cells = [cell.strip() for cell in stripped.strip("|").split("|") if cell.strip()]
+            if cells:
+                cleaned_lines.append("- " + " / ".join(cells))
+            continue
+        cleaned_lines.append(line.rstrip())
+
+    result = "\n".join(cleaned_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def create_emergency_alert(item: dict[str, str]) -> str:
