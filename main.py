@@ -31,6 +31,7 @@ SENT_ALERTS_FILE = Path(os.getenv("SENT_ALERTS_FILE", "sent_alerts.json"))
 STATE_RETENTION_DAYS = 14
 ALERT_MONITOR_MINUTES = 15
 PRE_EVENT_REMINDER_HOURS = 6
+MAX_EMERGENCY_ALERTS_PER_DAY = 2
 
 REPORT_SCHEDULES = [
     {
@@ -46,6 +47,7 @@ REPORT_SCHEDULES = [
         "timezone": KST,
         "hour": 8,
         "minute": 0,
+        "weekdays_only": True,
     },
     {
         "id": "korea_close",
@@ -53,6 +55,7 @@ REPORT_SCHEDULES = [
         "timezone": KST,
         "hour": 16,
         "minute": 0,
+        "weekdays_only": True,
     },
     {
         "id": "europe_pre",
@@ -60,6 +63,7 @@ REPORT_SCHEDULES = [
         "timezone": PARIS,
         "hour": 8,
         "minute": 0,
+        "weekdays_only": True,
     },
     {
         "id": "europe_close",
@@ -67,6 +71,7 @@ REPORT_SCHEDULES = [
         "timezone": PARIS,
         "hour": 18,
         "minute": 0,
+        "weekdays_only": True,
     },
     {
         "id": "us_pre",
@@ -74,6 +79,7 @@ REPORT_SCHEDULES = [
         "timezone": NEW_YORK,
         "hour": 8,
         "minute": 30,
+        "weekdays_only": True,
     },
     {
         "id": "us_close",
@@ -81,6 +87,7 @@ REPORT_SCHEDULES = [
         "timezone": NEW_YORK,
         "hour": 16,
         "minute": 30,
+        "weekdays_only": True,
     },
 ]
 
@@ -455,6 +462,21 @@ def mark_sent(key: str, kind: str, title: str, url: str = "") -> None:
     save_sent_state(state)
 
 
+def sent_today_count(kind: str) -> int:
+    today = datetime.now(KST).date()
+    count = 0
+    for item in load_sent_state().get("items", {}).values():
+        if item.get("kind") != kind:
+            continue
+        try:
+            sent_at = datetime.fromisoformat(item["sent_at"]).astimezone(KST)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if sent_at.date() == today:
+            count += 1
+    return count
+
+
 def fetch_news(max_per_feed: int = 10) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for source, url in NEWS_FEEDS:
@@ -621,6 +643,14 @@ def score_news_item(item: dict[str, str]) -> dict[str, Any]:
     normalized = normalize_text(text)
     is_hard_shock = contains_any(text, HARD_SHOCK_TERMS)
     is_scheduled_macro = contains_any(text, {"cpi", "pce", "core pce", "fomc", "nonfarm payrolls", "jobs report"})
+    is_actual_release = contains_any(
+        text,
+        {
+            "actual", "released", "rose", "fell", "increased", "decreased",
+            "beats", "misses", "hotter than expected", "cooler than expected",
+            "예상 상회", "예상 하회", "발표",
+        },
+    ) and bool(re.search(r"\d", text))
     is_sharp_move = contains_any(text, SHARP_MARKET_MOVE_TERMS) or bool(
         re.search(r"\b(up|down|falls|rises|drops|jumps)\s+\d+(\.\d+)?%", normalized)
     )
@@ -634,7 +664,7 @@ def score_news_item(item: dict[str, str]) -> dict[str, Any]:
     if is_sharp_move:
         score += 2
 
-    if is_hard_shock or is_scheduled_macro or (score >= 6 and is_sharp_move):
+    if is_hard_shock or (is_scheduled_macro and is_actual_release):
         importance = "★★★★★"
     elif score >= 2:
         importance = "★★★★"
@@ -673,11 +703,12 @@ def filter_news(news: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def collect_market_data(report_type: str) -> dict[str, Any]:
     raw_news = fetch_news()
+    calendar_days = 3 if report_type == "morning" else 1
     return {
         "report_type": report_type,
         "generated_at_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "news": filter_news(raw_news),
-        "economic_calendar": fetch_economic_calendar(days_ahead=1),
+        "economic_calendar": fetch_economic_calendar(days_ahead=calendar_days),
         "crypto_prices": fetch_crypto_prices(),
         "major_indices": fetch_major_indices(),
         "already_sent_items": list(load_sent_state().get("items", {}).values())[-20:],
@@ -701,6 +732,11 @@ def common_writing_rules() -> str:
 - 지표 숫자는 단독으로 쓰지 말고 "무슨 지표 / 발표 시간 / 예상·이전치 대비 / 시장 의미"를 붙여 작성
 - 뉴스 나열 금지, 핵심 변수만 정리
 - 실제 발생한 뉴스, 공식 경제지표, 주요 시장 데이터만 사용
+- 원자료의 숫자를 직접 계산해 검산하고, 맞지 않으면 변화율을 쓰지 말 것
+- 서로 다른 시각의 값을 같은 시점의 값처럼 섞지 말 것
+- 각 자산의 데이터 날짜를 확인하고 휴장 또는 오래된 종가는 "직전 거래일"로 명시
+- 원자료에 없는 수급, 종목 가격, ETF 자금 흐름, 고점/저점은 절대 만들어내지 말 것
+- 이전 리포트와 달라진 내용이 없으면 같은 해설 대신 "핵심 판단 변화 없음"으로 축약
 - 전문가 개인 전망, SNS 노이즈, 알트코인 홍보, 가격 목표가 제외
 - 매수/매도, 롱/숏, 진입/손절, 가격 예측 표현 금지
 - 이미 긴급 알림으로 보낸 정보는 반복하지 말고 업데이트만 짧게 언급
@@ -726,18 +762,28 @@ def report_prompt(report_type: str) -> str:
 
 반드시 아래 제목과 섹션을 그대로 사용하세요.
 
+제목 바로 아래에 오늘의 시장 상태를 한 문장으로 먼저 요약하세요.
+
+주말 작성 규칙:
+- 생성일이 토요일 또는 일요일이면 한국·유럽·미국 현물시장은 휴장이라고 명시하세요.
+- 휴장 자산은 현재가처럼 쓰지 말고 "직전 거래일 종가"와 데이터 날짜를 표시하세요.
+- Crypto, 주말 지정학 뉴스, 다음 거래일 핵심 일정에 집중하세요.
+
 ## 0. [Current Asset Snapshot]
-BTC, ETH, Nasdaq, DXY, 미국 2년물/10년물 금리, KOSPI, 유가, 금 중 오늘 중요한 것만 bullet로 요약하세요.
+BTC, ETH, Nasdaq 100, DXY, 미국 2년물/10년물 금리, KOSPI, USD/KRW, 유가, 금 중 오늘 중요한 것만 bullet로 요약하세요.
 원자료에 값이 없는 자산은 억지로 쓰지 마세요.
-예:
-- BTC: 00,000달러, 24시간 -0.0%. 위험자산 압력 확인.
-- Nasdaq: 시가 00,000 → 현재 00,000, -0.0%. 기술주 부담.
+각 bullet은 "자산 / 현재값 / 변화 / 핵심" 순서가 한눈에 보이게 작성하세요.
+BTC와 ETH는 현재가와 24시간 변화율을 쓰세요. 고점/저점은 원자료에 있을 때만 씁니다.
+주식·지수·원자재는 데이터 날짜를 반드시 확인하세요.
+마지막에 자산 간 흐름을 연결한 해석을 1~2문장으로 작성하세요.
 
 ## 1. [Signal vs Noise]
 오늘 시장에서 실제로 중요한 핵심 신호 2~4개만 정리하세요.
+각 신호는 "소제목 → 확인된 사실 → 시장 의미" 순서로 2~3줄 이내 작성하세요.
+비슷한 의미의 달러·금리·위험자산 문장을 여러 번 반복하지 마세요.
 
 ## 2. [Economic Calendar]
-앞으로 24시간 안의 중요한 일정만 bullet로 정리하세요. 중요도 낮은 일정은 제외하세요.
+오늘과 향후 3거래일의 ★★★★ 이상 일정만 최대 5개 정리하세요.
 영어 지표명을 그대로 쓰지 말고 title_ko와 country_ko를 우선 사용하세요.
 예:
 - 21:30 KST / 미국 / 근원 PCE 물가 / ★★★★★
@@ -746,6 +792,7 @@ BTC, ETH, Nasdaq, DXY, 미국 2년물/10년물 금리, KOSPI, 유가, 금 중 �
 
 ## 3. [Market Pulse]
 Crypto, Dollar, Rates, Nasdaq, KOSPI, Oil/Gold 중 중요한 것만 bullet로 요약하세요.
+각 항목은 "현재 핵심 / 의미"만 한 줄로 작성하고 0번 섹션의 숫자를 되풀이하지 마세요.
 
 ## 4. [Indicator Sensitivity]
 오늘 주요 지표 2~4개만 bullet로 정리하세요.
@@ -757,6 +804,7 @@ Crypto, Dollar, Rates, Nasdaq, KOSPI, Oil/Gold 중 중요한 것만 bullet로 �
 
 ## 5. [Today’s Priority]
 오늘 확인할 우선순위 3~5개만 번호로 정리하세요.
+BTC 가격대는 원자료로 확인 가능한 고점/저점 또는 핵심 레벨이 있을 때만 쓰세요.
 마지막 문장은 반드시 "오늘 핵심은 [가장 중요한 지표/이벤트] → DXY → 미국채 금리 → Nasdaq → BTC 순서로 관찰." 형식으로 끝내세요.
 """,
         "korea_pre": """
@@ -942,6 +990,10 @@ def send_report(report_type: str) -> None:
 
 def monitor_emergency_alerts() -> None:
     try:
+        if sent_today_count("emergency") >= MAX_EMERGENCY_ALERTS_PER_DAY:
+            logging.info("Daily emergency alert limit reached.")
+            return
+
         news = filter_news(fetch_news(max_per_feed=6))
         market_snapshot = {
             "generated_at_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
@@ -963,29 +1015,8 @@ def monitor_emergency_alerts() -> None:
             if sent_count >= 1:
                 break
 
-        if sent_count >= 1:
-            return
-
-        crypto = market_snapshot["crypto_prices"]
-        for asset, values in crypto.items():
-            change = float(values.get("usd_24h_change") or 0)
-            if abs(change) < 5:
-                continue
-            key = f"crypto_move:{asset}:{datetime.now(KST).strftime('%Y-%m-%d-%H')}"
-            if already_sent(key):
-                continue
-            direction = "급등" if change > 0 else "급락"
-            item = {
-                "title": f"{asset.upper()} 24시간 {direction} {change:.2f}%",
-                "importance": "★★★★★",
-                "source": "CoinGecko",
-                "summary": "BTC/ETH 급변은 위험자산 심리와 연동될 수 있어 긴급 알림 후보로 처리합니다.",
-                "market_snapshot": market_snapshot,
-            }
-            alert = create_emergency_alert(item)
-            send_telegram_message(alert)
-            mark_sent(key, "crypto_move", item["title"])
-            break
+        # Rolling BTC/ETH percentage moves belong in regular reports. Emergency
+        # alerts require a verified new event, not another hourly price update.
     except Exception:
         logging.exception("Emergency alert monitor failed.")
 
@@ -1015,9 +1046,15 @@ def start_scheduler() -> None:
     scheduler = BlockingScheduler(timezone=KST)
 
     for item in REPORT_SCHEDULES:
+        day_of_week = "mon-fri" if item.get("weekdays_only") else "*"
         scheduler.add_job(
             send_report,
-            CronTrigger(hour=item["hour"], minute=item["minute"], timezone=item["timezone"]),
+            CronTrigger(
+                day_of_week=day_of_week,
+                hour=item["hour"],
+                minute=item["minute"],
+                timezone=item["timezone"],
+            ),
             args=[item["id"]],
             id=f"report_{item['id']}",
             replace_existing=True,
