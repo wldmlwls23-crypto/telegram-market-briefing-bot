@@ -1,0 +1,11 @@
+.env
+.env.*
+.venv/
+__pycache__/
+*.py[cod]
+sent_alerts.json
+.DS_Store
+*.zip
+*.7z
+*.rar
+*.log
