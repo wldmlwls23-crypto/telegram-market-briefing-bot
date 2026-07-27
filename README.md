@@ -1,263 +1,184 @@
-# Telegram Market Briefing Bot for Railway
+# JIN Market Pulse v2
 
-비개발자도 Railway에 바로 배포할 수 있는 Python 텔레그램 자동 시장 브리핑 봇입니다.
+한국어 Telegram 시장 브리핑 봇입니다. Railway의 백그라운드 worker로 실행됩니다.
 
-이 봇은 Railway에서 24시간 켜진 worker로 실행되며, 한국장/유럽장/미국장 세션 기준으로 시장 브리핑을 텔레그램으로 보냅니다.
+v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 정확성과 가독성입니다.
 
-## 기능
+## 현재 활성 기능
 
-- Telegram Bot API `sendMessage`로 텔레그램 전송
-- OpenAI API로 뉴스와 시장 데이터를 요약
-- 매일 Morning Market Report 전에 BTC 1일 가격 차트 이미지 전송
-- `.env` 또는 Railway Variables로 환경변수 관리
-- APScheduler로 한국장, 유럽장, 미국장 세션 기준 예약 실행
-- 확인된 시장 충격과 실제 발표된 핵심 지표만 긴급 알림
-- 단순 BTC/ETH 24시간 등락률 반복 알림 제외
-- 긴급 알림은 하루 최대 2회, 동일 주제는 하루 1회
-- 예정된 ★★★★★ 이벤트 6시간 전 사전 알림
-- `sent_alerts.json` 기반 중복 알림 방지
-- Railway 자동 배포 지원
-- 오류 발생 시 텔레그램으로 오류 메시지 전송
+- BTC와 ETH 현재가 및 24시간 변화
+- Nasdaq 100, S&P 500, Dow, KOSPI, KOSDAQ
+- DXY, 원/달러, WTI 유가, 금
+- 미국 재무부 공식 2년물과 10년물 금리
+- 중요 경제일정과 예상치, 이전치, 실제 발표값
+- 06:50 KST Morning Market Report
+- 중요도 5성 이벤트 6시간 전 사전 알림
+- 이벤트 발표 직전 시장 기준값 저장
+- 실제 발표값과 발표 전후 시장 반응 업데이트
+- 신뢰 가능한 출처 기반 긴급 알림
+- Railway Volume을 이용한 중복 방지 상태 유지
 
-## 폴더 구조
+한국, 유럽, 미국 세션별 리포트는 모닝 리포트 검증이 끝난 뒤 v2.1에서 순차 활성화합니다.
 
-```text
-.
-├─ main.py
-├─ requirements.txt
-├─ Procfile
-├─ railway.json
-├─ .env.example
-├─ .gitignore
-└─ README.md
-```
+## 데이터 원칙
 
-## 필요한 계정
+- BTC와 ETH: CoinGecko
+- 지수, 외환, 원자재: Yahoo Finance 보조 데이터
+- 미국채 2년물과 10년물: U.S. Department of the Treasury
+- 경제일정: Forex Factory calendar feed
+- 시장 뉴스: Google News RSS에서 신뢰 가능한 매체만 선별
+- 선택적 우선 공급원: Financial Modeling Prep
 
-1. Telegram 계정
-2. OpenAI API 계정
-3. GitHub 계정
-4. Railway 계정
+모든 가격에는 비교 기준, 데이터 시각, 출처가 붙습니다. 핵심 데이터가 부족하면 GPT가 빈칸을 채우지 않고 `[시장 데이터 점검 알림]`을 보냅니다.
 
-## 1. Telegram Bot 만들기
-
-1. 텔레그램에서 `@BotFather`를 검색합니다.
-2. `/newbot`을 입력합니다.
-3. 봇 이름을 정합니다.
-4. BotFather가 알려주는 토큰을 복사합니다.
-
-이 값이 `TELEGRAM_BOT_TOKEN`입니다.
-
-## 2. Telegram Chat ID 확인
-
-1. 방금 만든 봇에게 텔레그램에서 아무 메시지나 보냅니다.
-2. 브라우저 주소창에 아래 주소를 입력합니다.
-
-```text
-https://api.telegram.org/bot봇토큰/getUpdates
-```
-
-예시:
-
-```text
-https://api.telegram.org/bot123456789:ABCDEF/getUpdates
-```
-
-3. 화면에서 `"chat":{"id":123456789}`처럼 보이는 숫자를 찾습니다.
-
-이 숫자가 `TELEGRAM_CHAT_ID`입니다.
-
-## 3. OpenAI API Key 준비
-
-OpenAI API 키를 준비합니다.
-
-이 값이 `OPENAI_API_KEY`입니다.
-
-## 4. 로컬에서 테스트하기
-
-Windows PowerShell 기준입니다.
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-```
-
-`.env` 파일을 열고 값을 입력합니다.
-
-```text
-TELEGRAM_BOT_TOKEN=본인_텔레그램_봇_토큰
-TELEGRAM_CHAT_ID=본인_텔레그램_채팅_ID
-OPENAI_API_KEY=본인_OpenAI_API_Key
-OPENAI_MODEL=gpt-4o-mini
-RUN_ON_START=true
-```
-
-테스트 실행:
-
-```powershell
-python main.py
-```
-
-`RUN_ON_START=true`이면 실행 직후 텔레그램으로 테스트 브리핑이 1번 전송됩니다.
-테스트가 끝나면 Railway 배포 전에는 `RUN_ON_START=false`로 바꾸는 것을 권장합니다.
-
-## 5. GitHub에 업로드하기
-
-### 방법 A: GitHub 웹사이트로 업로드
-
-1. [GitHub](https://github.com)에 로그인합니다.
-2. 오른쪽 위 `+` 버튼을 누릅니다.
-3. `New repository`를 클릭합니다.
-4. Repository name에 원하는 이름을 입력합니다.
-   예: `telegram-market-briefing-bot`
-5. `Public` 또는 `Private`를 선택합니다.
-6. `Create repository`를 클릭합니다.
-7. `uploading an existing file`을 클릭합니다.
-8. 이 폴더의 파일을 업로드합니다.
-
-업로드할 파일:
-
-- `main.py`
-- `requirements.txt`
-- `Procfile`
-- `railway.json`
-- `.env.example`
-- `.gitignore`
-- `README.md`
-
-업로드하지 말아야 할 파일:
+## GitHub에 올리면 안 되는 파일
 
 - `.env`
-- `.venv`
-- `__pycache__`
+- 실제 OpenAI API Key
+- 실제 Telegram Bot Token
+- 실제 FMP API Key
+- `sent_alerts.json`
+- ZIP 또는 RAR 압축본
+- 로그 파일
 
-`.env`에는 비밀키가 들어 있으므로 GitHub에 올리면 안 됩니다.
+`.env.example`에는 예시값만 있으므로 GitHub에 올려도 됩니다.
 
-### 방법 B: 명령어로 업로드
+## Railway Variables
 
-Git이 설치되어 있다면 아래 순서로 업로드할 수 있습니다.
+필수:
+
+```text
+TELEGRAM_BOT_TOKEN=실제 값
+TELEGRAM_CHAT_ID=실제 값
+OPENAI_API_KEY=실제 값
+OPENAI_MODEL=gpt-5.6
+OPENAI_REASONING_EFFORT=medium
+OPENAI_WEB_SEARCH=true
+RUN_ON_START=false
+STATE_DIR=/data
+ENABLED_REPORTS=morning
+ENABLE_EMERGENCY_ALERTS=false
+REQUEST_TIMEOUT_SECONDS=25
+```
+
+선택:
+
+```text
+FMP_API_KEY=
+```
+
+비밀값은 Railway Variables에서만 관리합니다.
+
+## Railway Volume 연결
+
+중복 방지 기록을 재배포 후에도 유지하려면 Volume이 필요합니다.
+
+1. Railway에서 `telegram-market-briefing-bot` 서비스를 엽니다.
+2. 서비스에 Volume을 추가합니다.
+3. Mount Path를 `/data`로 설정합니다.
+4. Variables에서 `STATE_DIR=/data`인지 확인합니다.
+5. 저장하고 배포합니다.
+
+Volume을 연결하지 않아도 봇은 실행되지만 재배포하면 중복 기록이 초기화될 수 있습니다.
+
+## 첫 v2 테스트
+
+처음에는 긴급 알림을 끈 상태로 모닝 리포트 한 번만 확인합니다.
+
+1. Railway Variables에서 `ENABLE_EMERGENCY_ALERTS=false`를 확인합니다.
+2. `RUN_ON_START=true`로 바꿉니다.
+3. Apply 또는 Deploy를 누릅니다.
+4. Telegram에 v2 Morning Market Report가 한 번 오는지 확인합니다.
+5. Railway Logs에 `Morning Market Report sent successfully`가 있는지 확인합니다.
+6. 테스트가 끝나면 반드시 `RUN_ON_START=false`로 되돌립니다.
+7. 다시 Apply 또는 Deploy를 누릅니다.
+
+`RUN_ON_START=true`를 그대로 두면 재시작할 때마다 테스트 리포트가 반복됩니다.
+
+## 긴급 알림 활성화
+
+모닝 리포트를 먼저 확인한 뒤:
+
+```text
+ENABLE_EMERGENCY_ALERTS=true
+```
+
+로 변경하고 배포합니다.
+
+긴급 알림은 다음 조건을 모두 통과해야 합니다.
+
+- 공식 출처 한 곳 또는 서로 다른 신뢰 매체 두 곳 이상
+- 갑작스러운 시장 충격 후보
+- 같은 주제 6시간 내 재전송 아님
+- 최근 30분 동안 긴급 알림이 3건 미만
+- OpenAI의 최종 검증 통과
+
+## 로컬 검증
+
+공개 데이터 공급원만 확인:
 
 ```powershell
-git init
-git add .
-git commit -m "Initial Railway telegram briefing bot"
-git branch -M main
-git remote add origin https://github.com/본인아이디/저장소이름.git
-git push -u origin main
+python -m jin_market_pulse.smoke
 ```
 
-## 6. Railway에 배포하기
+단위 테스트:
 
-1. [Railway](https://railway.app)에 로그인합니다.
-2. `New Project`를 클릭합니다.
-3. `Deploy from GitHub repo`를 선택합니다.
-4. 방금 업로드한 GitHub 저장소를 선택합니다.
-5. Railway가 자동으로 Python 프로젝트를 감지하고 배포를 시작합니다.
-
-이 프로젝트에는 Railway용 파일이 이미 들어 있습니다.
-
-- `requirements.txt`: Python 패키지 설치 목록
-- `Procfile`: worker 실행 명령
-- `railway.json`: Railway 배포 설정
-
-## 7. Railway 환경변수 설정하기
-
-Railway 프로젝트 화면에서:
-
-1. 배포된 서비스를 클릭합니다.
-2. `Variables` 탭을 엽니다.
-3. 아래 변수를 추가합니다.
-
-```text
-TELEGRAM_BOT_TOKEN=본인_텔레그램_봇_토큰
-TELEGRAM_CHAT_ID=본인_텔레그램_채팅_ID
-OPENAI_API_KEY=본인_OpenAI_API_Key
-OPENAI_MODEL=gpt-4o-mini
-RUN_ON_START=false
+```powershell
+pytest -q
 ```
 
-저장하면 Railway가 자동으로 다시 배포합니다.
+실제 공개 공급원까지 포함:
 
-## 8. 24시간 동작 방식
-
-Railway는 `python main.py`를 계속 실행합니다.
-`main.py` 안의 APScheduler가 아래 시간마다 브리핑을 보냅니다.
-
-- 06:50 KST - Morning Market Report
-- 08:00 KST - Korea Pre-Market
-- 16:00 KST - Korea Close Recap
-- 08:00 Europe/Paris - Europe Pre-Market
-- 18:00 Europe/Paris - Europe Close Recap
-- 08:30 America/New_York - US Pre-Market
-- 16:30 America/New_York - US Close Recap
-
-Morning Market Report는 매일 발송합니다. 한국·유럽·미국의 장 전/마감 리포트는 각 시장 현지시간 기준 월요일부터 금요일까지만 발송하며, 주말 Morning Market Report에는 휴장 자산을 직전 거래일 종가로 명시합니다.
-
-유럽장과 미국장 스케줄은 코드에서 `Europe/Paris`, `America/New_York` 시간대를 사용하므로 서머타임을 자동 반영합니다.
-
-프로그램이 오류로 종료되면 `railway.json` 설정에 따라 Railway가 다시 시작을 시도합니다.
-
-## 9. Railway에서 바로 테스트 전송하기
-
-처음 배포 후 테스트 메시지를 바로 받고 싶으면 Railway Variables에서:
-
-```text
-RUN_ON_START=true
+```powershell
+$env:RUN_LIVE_TESTS='true'
+pytest -q
 ```
 
-로 바꾸고 저장합니다.
+로컬 테스트에는 실제 Telegram Token이나 OpenAI API Key가 필요하지 않습니다. 실제 OpenAI 생성과 Telegram 전송은 Railway에서 확인합니다.
 
-텔레그램 메시지가 정상적으로 오면 다시:
-
-```text
-RUN_ON_START=false
-```
-
-로 바꾸는 것을 권장합니다.
-
-그렇지 않으면 Railway가 재시작될 때마다 브리핑이 한 번씩 추가 전송될 수 있습니다.
-
-## 10. 브리핑 형식
-
-06:50 Morning Market Report는 아래 고정 형식으로 전송됩니다.
+## Morning Market Report 형식
 
 ```text
 # Morning Market Report
+
 ## 0. [Current Asset Snapshot]
 ## 1. [Signal vs Noise]
 ## 2. [Economic Calendar]
 ## 3. [Market Pulse]
 ## 4. [Indicator Sensitivity]
-## 5. [Today’s Priority]
+## 5. [Today's Priority]
 ```
 
-다른 정규 리포트는 Korea Pre-Market, Korea Close Recap, Europe Pre-Market, Europe Close Recap, US Pre-Market, US Close Recap 성격에 맞춰 작성됩니다.
+표, 파이프 문자, `N/A`, `확인 필요`, 매수와 매도 지시는 사용하지 않습니다. 메시지가 길면 문단 경계에서 `1/2`, `2/2`로 나누어 전송합니다.
 
-중요도 ★★★★★ 뉴스는 정규 시간 외에도 `[긴급 시장 알림 | ★★★★★]` 형식으로 전송됩니다.
+## 자동 실행
 
-## 11. 자주 생기는 문제
+Railway 시작 명령:
 
-### 텔레그램 메시지가 오지 않아요
+```text
+python main.py
+```
 
-- 봇에게 먼저 아무 메시지나 보냈는지 확인하세요.
-- `TELEGRAM_BOT_TOKEN`이 정확한지 확인하세요.
-- `TELEGRAM_CHAT_ID`가 정확한지 확인하세요.
+정규 Morning Market Report:
 
-### Railway 배포는 됐는데 실행이 안 돼요
+```text
+매일 06:50 KST
+```
 
-- Railway의 `Variables`에 3개 필수 값이 모두 있는지 확인하세요.
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `OPENAI_API_KEY`
+이 서비스는 웹사이트가 아닌 worker이므로 Railway에서 `Unexposed service`라고 표시되어도 정상입니다.
 
-### OpenAI 오류가 나요
+## 오류 확인
 
-- OpenAI API 키가 정확한지 확인하세요.
-- OpenAI API 결제 또는 사용 한도를 확인하세요.
+Telegram 메시지가 오지 않으면 Railway의 `Deployments`에서 최신 배포가 성공했는지 확인하고 `View Logs`를 엽니다.
 
-### GitHub에 .env를 올렸어요
+주요 로그:
 
-즉시 OpenAI API 키와 Telegram Bot Token을 새로 발급하세요.
-`.env` 파일은 절대 GitHub에 올리면 안 됩니다.
+```text
+JIN Market Pulse v2 started
+Morning Market Report sent successfully
+Morning report withheld
+OpenAI morning analysis failed
+Scheduled job failed
+```
+
+`Morning report withheld`는 핵심 공급원 데이터가 부족해 잘못된 리포트를 보내지 않았다는 뜻입니다.

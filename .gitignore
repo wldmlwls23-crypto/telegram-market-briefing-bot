@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -9,3 +10,4 @@ sent_alerts.json
 *.7z
 *.rar
 *.log
+.pytest_cache/
