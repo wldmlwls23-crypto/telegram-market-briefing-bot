@@ -70,14 +70,65 @@ def test_ai_advisor_daily_limit_is_enforced(
     assert "오늘의 AI 설명 횟수" in second
 
 
-def test_current_cause_question_does_not_invent_live_reason(settings, tmp_path):
+def test_current_cause_question_uses_verified_context_before_price_lookup(
+    settings,
+    market_data,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_market_quotes",
+        lambda _settings: (market_data.quotes.copy(), []),
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_news",
+        lambda max_per_feed=5: market_data.news,
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.create_current_move_answer",
+        lambda question, target, quotes, news, _settings: (
+            f"<b>현재 움직임 설명</b>\n{target.key}:{question}"
+        ),
+    )
+
     answer = answer_market_query(
         "지금 비트가 왜 떨어져?",
         settings,
         StateStore(tmp_path / "state.json"),
     )
 
-    assert "현재 움직임의 원인은 단정하지 않습니다" in answer
+    assert answer.startswith("<b>현재 움직임 설명</b>")
+    assert "btc:지금 비트가 왜 떨어져?" in answer
+
+
+def test_cause_intent_wins_even_when_question_contains_price_word(
+    settings,
+    market_data,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_market_quotes",
+        lambda _settings: (market_data.quotes.copy(), []),
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_news",
+        lambda max_per_feed=5: [],
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.create_current_move_answer",
+        lambda question, target, quotes, news, _settings: (
+            "<b>현재 움직임 설명</b>\n원인 분석"
+        ),
+    )
+
+    answer = answer_market_query(
+        "코스피 왜 이렇게 가격이 떨어지는지 이유에 대해 알려줘",
+        settings,
+        StateStore(tmp_path / "state.json"),
+    )
+
+    assert answer == "<b>현재 움직임 설명</b>\n원인 분석"
 
 
 def test_trading_prediction_is_refused(settings):

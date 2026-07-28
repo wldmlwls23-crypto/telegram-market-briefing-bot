@@ -6,12 +6,14 @@ import re
 
 from .advisor import (
     create_advisor_answer,
+    create_current_move_answer,
     matched_topics,
     render_topic_explanation,
 )
 from .calendar import fetch_economic_events
 from .config import KST, Settings
 from .models import AssetQuote, EconomicEvent, MarketData
+from .news import fetch_news
 from .providers import fetch_asset_quote, fetch_market_quotes
 from .reports import format_quote, select_future_events
 from .state import StateStore
@@ -76,7 +78,7 @@ ADVICE_TERMS = {
     "들어가도",
 }
 RELATION_TERMS = {"관계", "영향", "연결", "왜", "오르면", "내리면"}
-CURRENT_TERMS = {"지금", "오늘", "현재", "방금"}
+CAUSE_TERMS = {"왜", "이유", "원인", "배경"}
 MARKET_TERMS = {
     "시장",
     "주식",
@@ -185,6 +187,38 @@ def _advisor_or_limit(
         return "<b>AI 설명을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.</b>"
 
 
+def _current_move_or_limit(
+    text: str,
+    key: str,
+    settings: Settings,
+    store: StateStore | None,
+) -> str:
+    if not settings.enable_ai_advisor or store is None:
+        return "<b>현재 움직임 설명은 AI 시장 설명이 활성화되어야 사용할 수 있습니다.</b>"
+    if not store.claim_ai_advisor_slot(settings.ai_advisor_daily_limit):
+        return "\n".join(
+            [
+                "<b>오늘의 AI 설명 횟수를 모두 사용했습니다.</b>",
+                "가격·일정·기본 용어 설명은 계속 이용할 수 있습니다.",
+            ]
+        )
+    try:
+        quotes, _ = fetch_market_quotes(settings)
+        target = quotes.get(key) or fetch_asset_quote(key, settings)
+        quotes[key] = target
+        return create_current_move_answer(
+            text,
+            target,
+            quotes,
+            fetch_news(max_per_feed=5),
+            settings,
+        )
+    except Exception:
+        store.release_ai_advisor_slot()
+        logging.exception("Current market move explanation failed for %s.", key)
+        return "<b>현재 움직임 설명을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.</b>"
+
+
 def answer_market_query(
     text: str,
     settings: Settings,
@@ -221,9 +255,7 @@ def answer_market_query(
     )
     wants_explanation = any(term in normalized for term in EXPLAIN_TERMS)
     asks_relation = any(term in normalized for term in RELATION_TERMS)
-
-    if key and wants_price:
-        return _live_quote(key, settings)
+    asks_cause = any(term in normalized for term in CAUSE_TERMS)
 
     if any(term in normalized for term in ADVICE_TERMS):
         return "\n".join(
@@ -233,16 +265,11 @@ def answer_market_query(
             ]
         )
 
-    if "왜" in normalized and any(
-        term in normalized for term in CURRENT_TERMS
-    ):
-        return "\n".join(
-            [
-                "<b>현재 움직임의 원인은 단정하지 않습니다.</b>",
-                "실시간 뉴스와 여러 자산의 반응을 함께 검증해야 하기 때문입니다.",
-                "현재 숫자는 /markets에서 확인할 수 있습니다.",
-            ]
-        )
+    if key and asks_cause:
+        return _current_move_or_limit(text, key, settings, store)
+
+    if key and wants_price:
+        return _live_quote(key, settings)
 
     if len(topics) == 1 and wants_explanation and not asks_relation:
         return render_topic_explanation(topics[0])

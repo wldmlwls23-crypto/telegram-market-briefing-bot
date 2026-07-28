@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 
 from openai import OpenAI
 
 from .config import Settings
+from .models import AssetQuote, NewsItem
 
 
 TOPIC_EXPLANATIONS = {
@@ -165,3 +167,76 @@ def create_advisor_answer(question: str, settings: Settings) -> str:
     if not cleaned:
         raise RuntimeError("OpenAI advisor returned empty text")
     return "<b>시장 설명</b>\n" + html.escape(cleaned)
+
+
+def create_current_move_answer(
+    question: str,
+    target: AssetQuote,
+    market_quotes: dict[str, AssetQuote],
+    news: list[NewsItem],
+    settings: Settings,
+) -> str:
+    quote_keys = (
+        target.key,
+        "dxy",
+        "us10y",
+        "nasdaq100",
+        "kospi",
+        "wti",
+        "gold",
+        "btc",
+    )
+    quotes_payload = []
+    for key in dict.fromkeys(quote_keys):
+        quote = market_quotes.get(key)
+        if quote is None:
+            continue
+        quotes_payload.append(
+            {
+                "asset": quote.name_ko,
+                "current": quote.current,
+                "previous": quote.previous,
+                "change_percent": quote.percent_change,
+                "as_of": quote.as_of.isoformat(),
+                "comparison": quote.comparison_label,
+                "source": quote.source,
+            }
+        )
+    news_payload = [
+        {
+            "title": item.title,
+            "publisher": item.publisher,
+            "published_at": (
+                item.published_at.isoformat() if item.published_at else ""
+            ),
+        }
+        for item in news[:12]
+    ]
+    context = json.dumps(
+        {"quotes": quotes_payload, "recent_news": news_payload},
+        ensure_ascii=False,
+    )
+    client = OpenAI(api_key=settings.openai_api_key)
+    response = client.responses.create(
+        model=settings.openai_model,
+        instructions=(
+            "한국의 비개발자 개인투자자에게 현재 시장 움직임을 설명하는 상담사입니다. "
+            "입력된 검증 가격과 최근 뉴스 제목만 근거로 쉬운 한국어로 답하세요. "
+            "첫 줄에는 대상 자산의 현재값과 비교값, 변동률을 짧게 정리하세요. "
+            "그다음 하락 또는 상승의 배경을 중요도 순으로 최대 3개 설명하세요. "
+            "뉴스가 자산 움직임의 직접 원인이라고 확인되지 않았으면 반드시 "
+            "'가능한 배경' 또는 '함께 나타난 흐름'이라고 표현하세요. "
+            "자료가 부족하면 정확한 원인은 단정할 수 없다고 분명히 말하되, "
+            "'확인 필요'라는 말만 남기지 말고 입력 자료에서 읽을 수 있는 관계를 설명하세요. "
+            "매수·매도·가격 예측은 제공하지 말고 표와 마크다운 제목은 쓰지 마세요. "
+            "전체 답변은 700자 이내로 작성하세요."
+        ),
+        input=f"사용자 질문: {question}\n검증 자료: {context}",
+        reasoning={"effort": "low"},
+        max_output_tokens=400,
+        store=False,
+    )
+    cleaned = _clean_advisor_text(response.output_text)
+    if not cleaned:
+        raise RuntimeError("OpenAI current move answer returned empty text")
+    return "<b>현재 움직임 설명</b>\n" + html.escape(cleaned)
