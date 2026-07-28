@@ -179,6 +179,29 @@ def _sensitivity(title: str, country: str) -> tuple[str, str]:
     )
 
 
+def event_meaning(event: EconomicEvent) -> str:
+    text = event.title.lower()
+    meanings = (
+        (("cpi", "consumer price"), "소비자가 체감하는 물가의 상승 속도"),
+        (("pce",), "Fed가 중요하게 보는 미국 소비 물가"),
+        (("ppi", "producer price"), "생산 단계의 물가 압력"),
+        (("non-farm", "nonfarm", "payroll"), "미국 고용 증가와 경기 강도"),
+        (("unemployment claims", "jobless claims"), "최근 미국 고용시장의 약화 여부"),
+        (("unemployment rate",), "노동시장 전체의 실업 비율"),
+        (("pmi", "ism"), "기업 활동을 통해 보는 경기 확장·위축"),
+        (("gdp",), "경제 전체의 성장 속도"),
+        (("retail sales",), "미국 소비지출의 강도"),
+        (("consumer sentiment",), "소비자가 느끼는 경기와 지출 심리"),
+        (("fomc", "federal funds rate"), "Fed의 금리 결정과 향후 정책 방향"),
+        (("powell",), "Fed의 향후 금리·물가 판단 단서"),
+        (("treasury auction",), "미국채 수요와 시장금리 압력"),
+    )
+    for terms, meaning in meanings:
+        if any(term in text for term in terms):
+            return meaning
+    return f"{event.country_ko} 경기·물가·금리 흐름을 판단하는 자료"
+
+
 def fetch_economic_events(
     settings: Settings,
     *,

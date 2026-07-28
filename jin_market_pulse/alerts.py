@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime, timedelta
 
-from .calendar import fetch_economic_events
+from .calendar import event_meaning, fetch_economic_events
 from .config import KST, Settings
 from .models import AssetQuote, EconomicEvent
 from .news import emergency_groups, fetch_news
@@ -23,25 +24,29 @@ RESULT_MIN_DELAY_MINUTES = 10
 
 def render_pre_event_reminder(event: EconomicEvent) -> str:
     lines = [
-        "[중요 이벤트 사전 알림 / ★★★★★]",
+        "<b>[중요 경제지표 사전 알림]</b>",
         "",
-        (
-            f"{event.event_time_kst.strftime('%m/%d %H:%M')} KST "
-            f"{event.country_ko} {event.title_ko} 발표 예정."
-        ),
+        f"<b>{html.escape(event.country_ko)} · {html.escape(event.title_ko)}</b>",
+        f"발표 시간: <b>{event.event_time_kst:%m/%d %H:%M} KST</b>",
+        f"중요도: {event.importance}",
     ]
-    if event.value_summary:
-        lines.extend(["", f"값: {event.value_summary}"])
+    values = []
+    if event.forecast:
+        values.append(f"예상: {html.escape(event.forecast)}")
+    if event.previous:
+        values.append(f"이전: {html.escape(event.previous)}")
+    if values:
+        lines.append(" / ".join(values))
     lines.extend(
         [
-            "",
-            "시장 관찰 포인트:",
-            "- DXY 반응",
-            "- 미국채 2년물과 10년물 반응",
-            "- Nasdaq 반응",
-            "- BTC 위험자산 동행 여부",
-            "",
-            "결과 발표 후 실제값과 시장 반응만 업데이트합니다.",
+            f"의미: {html.escape(event_meaning(event))}",
+            (
+                "해석: 상회 시 "
+                f"{html.escape(event.sensitivity_stronger)}"
+                " / 하회 시 "
+                f"{html.escape(event.sensitivity_weaker)}"
+            ),
+            "관찰: DXY → 미국채 금리 → Nasdaq → BTC",
         ]
     )
     return "\n".join(lines)
@@ -62,7 +67,7 @@ def send_due_pre_event_reminders(
         record = state.event_record(event.event_id)
         if record.get("pre_alert_sent_at"):
             continue
-        telegram.send(render_pre_event_reminder(event))
+        telegram.send(render_pre_event_reminder(event), parse_mode="HTML")
         state.update_event(
             event.event_id,
             title=event.title,
@@ -129,12 +134,15 @@ def render_event_result(
     quotes: dict[str, AssetQuote],
 ) -> str:
     lines = [
-        "[중요 이벤트 결과 업데이트 / ★★★★★]",
+        "<b>[중요 경제지표 결과]</b>",
         "",
-        f"{event.country_ko} {event.title_ko}",
+        f"<b>{html.escape(event.country_ko)} · {html.escape(event.title_ko)}</b>",
+        f"발표 시간: <b>{event.event_time_kst:%m/%d %H:%M} KST</b>",
+        f"중요도: {event.importance}",
     ]
     if event.value_summary:
-        lines.append(f"- {event.value_summary}")
+        lines.append(html.escape(event.value_summary))
+    lines.append(f"의미: {html.escape(event_meaning(event))}")
     reaction = _reaction_lines(before_snapshot, quotes)
     if reaction:
         lines.extend(["", "발표 전후 시장 반응:", *reaction])
@@ -142,9 +150,12 @@ def render_event_result(
     lines.extend(
         [
             "",
-            "해석 기준:",
-            f"- 강한 결과: {event.sensitivity_stronger}",
-            f"- 약한 결과: {event.sensitivity_weaker}",
+            (
+                "해석: 상회 시 "
+                f"{html.escape(event.sensitivity_stronger)}"
+                " / 하회 시 "
+                f"{html.escape(event.sensitivity_weaker)}"
+            ),
         ]
     )
     if not stronger_applies:
@@ -169,7 +180,10 @@ def send_due_event_results(
             continue
         quotes, _ = fetch_market_quotes(settings)
         before_snapshot = record.get("before_snapshot", {})
-        telegram.send(render_event_result(event, before_snapshot, quotes))
+        telegram.send(
+            render_event_result(event, before_snapshot, quotes),
+            parse_mode="HTML",
+        )
         state.update_event(
             event.event_id,
             stage="result_sent",
@@ -197,7 +211,10 @@ def monitor_emergency_alerts(
         if not analysis.verified:
             logging.info("Emergency candidate was not verified: %s", group[0].title)
             continue
-        telegram.send(render_emergency_alert(analysis, group, quotes))
+        telegram.send(
+            render_emergency_alert(analysis, group, quotes),
+            parse_mode="HTML",
+        )
         state.mark_alert(
             topic,
             group[0].title,

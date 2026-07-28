@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from jin_market_pulse.bot_queries import answer_market_query
+from jin_market_pulse.bot_queries import _calendar_html, answer_market_query
 from jin_market_pulse.state import StateStore
 
 
@@ -135,3 +135,39 @@ def test_trading_prediction_is_refused(settings):
     answer = answer_market_query("비트 지금 사도 될까?", settings)
 
     assert "매수·매도 결정과 가격 예측은 제공하지 않습니다" in answer
+
+
+def test_weekly_calendar_natural_language_uses_detailed_mobile_format(
+    settings,
+    market_data,
+    monkeypatch,
+):
+    event = market_data.events[0]
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_economic_events",
+        lambda _settings, days_ahead: [event],
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries._week_events",
+        lambda events, now: events,
+    )
+
+    answer = answer_market_query("앞으로 이번 주 경제 캘린더 일정 알려줘", settings)
+
+    assert "<b>이번 주 핵심 경제일정</b>" in answer
+    assert "발표 시간:" in answer
+    assert "중요도: ★★★★★" in answer
+    assert "예상: 0.2% / 이전: 0.1%" in answer
+    assert "의미: Fed가 중요하게 보는 미국 소비 물가" in answer
+    assert "해석: 상회 시" in answer
+
+
+def test_calendar_html_escapes_dynamic_event_text(market_data):
+    event = market_data.events[0].model_copy(
+        update={"title_ko": "CPI <속보>", "forecast": "<0.2%"}
+    )
+
+    answer = _calendar_html([event])
+
+    assert "CPI &lt;속보&gt;" in answer
+    assert "예상: &lt;0.2%" in answer

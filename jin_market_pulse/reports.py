@@ -572,23 +572,40 @@ def render_emergency_alert(
     quotes: dict[str, AssetQuote],
 ) -> str:
     news_map = _news_by_id(news_group)
+    published_times = [
+        item.published_at.astimezone(KST)
+        for item in news_group
+        if item.published_at
+    ]
+    occurred_at = max(published_times) if published_times else datetime.now(KST)
     lines = [
-        "[긴급 시장 알림 / ★★★★★]",
+        "<b>[긴급 시장 뉴스]</b>",
         "",
-        "핵심:",
-        f"- {analysis.summary_ko}",
+        f"발생 시간: <b>{occurred_at:%m/%d %H:%M} KST</b>",
+        "중요도: ★★★★★",
         "",
-        "시장 반응:",
+        "<b>핵심</b>",
+        f"- {html.escape(analysis.summary_ko)}",
+        "",
+        "<b>시장 반응</b>",
     ]
     for key in ("dxy", "us10y", "nasdaq100", "btc"):
         quote = quotes.get(key)
         if quote:
-            lines.append(format_quote(quote))
-    lines.extend(["", "의미:", f"- {analysis.meaning}", "", "출처:"])
+            lines.append(html.escape(format_quote(quote)))
+    lines.extend(
+        [
+            "",
+            "<b>의미</b>",
+            f"- {html.escape(analysis.meaning)}",
+            "",
+            "<b>출처</b>",
+        ]
+    )
     for news_id in analysis.source_news_ids:
         item = news_map.get(news_id)
         if item:
-            lines.append(f"- {item.publisher}")
+            lines.append(f"- {html.escape(item.publisher)}")
     return "\n".join(lines).strip()
 
 

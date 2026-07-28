@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+from datetime import datetime, timedelta
 
 from .advisor import (
     create_advisor_answer,
@@ -10,7 +11,7 @@ from .advisor import (
     matched_topics,
     render_topic_explanation,
 )
-from .calendar import fetch_economic_events
+from .calendar import event_meaning, fetch_economic_events
 from .config import KST, Settings
 from .models import AssetQuote, EconomicEvent, MarketData
 from .news import fetch_news
@@ -112,24 +113,64 @@ def _quote_html(quote: AssetQuote) -> str:
     return html.escape(format_quote(quote).removeprefix("- "))
 
 
-def _calendar_html(events: list[EconomicEvent]) -> str:
-    lines = ["<b>앞으로 24시간 주요 일정</b>"]
+def _calendar_html(
+    events: list[EconomicEvent],
+    *,
+    title: str = "앞으로 24시간 주요 일정",
+) -> str:
+    lines = [f"<b>{html.escape(title)}</b>"]
     if not events:
         lines.append("주요 일정 없음")
         return "\n".join(lines)
-    for event in events:
-        lines.append(
-            f"- {event.event_time_kst:%m/%d %H:%M} "
-            f"<b>{html.escape(event.title_ko)}</b>"
-        )
+    for index, event in enumerate(events):
+        if index:
+            lines.append("")
         values = []
+        if event.actual:
+            values.append(f"실제: {event.actual}")
         if event.forecast:
-            values.append(f"예상 {event.forecast}")
+            values.append(f"예상: {event.forecast}")
         if event.previous:
-            values.append(f"이전 {event.previous}")
-        if values:
-            lines.append("  " + html.escape(" · ".join(values)))
+            values.append(f"이전: {event.previous}")
+        lines.extend(
+            [
+                f"<b>{html.escape(event.country_ko)} · {html.escape(event.title_ko)}</b>",
+                f"발표 시간: <b>{event.event_time_kst:%m/%d %H:%M} KST</b>",
+                f"중요도: {event.importance}",
+                html.escape(" / ".join(values) if values else "발표 수치 없음"),
+                f"의미: {html.escape(event_meaning(event))}",
+                (
+                    "해석: 상회 시 "
+                    f"{html.escape(event.sensitivity_stronger)}"
+                    " / 하회 시 "
+                    f"{html.escape(event.sensitivity_weaker)}"
+                ),
+            ]
+        )
     return "\n".join(lines)
+
+
+def _week_events(events: list[EconomicEvent], now: datetime) -> list[EconomicEvent]:
+    days_to_sunday = 6 - now.weekday()
+    end = (now + timedelta(days=days_to_sunday + 1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    upcoming = [
+        event
+        for event in events
+        if now <= event.event_time_kst < end
+    ]
+    ranked = sorted(
+        upcoming,
+        key=lambda event: (
+            0 if event.importance == "★★★★★" else 1,
+            event.event_time_kst,
+        ),
+    )[:8]
+    return sorted(ranked, key=lambda event: event.event_time_kst)
 
 
 def _help() -> str:
@@ -140,9 +181,11 @@ def _help() -> str:
             "- DXY가 뭐야?",
             "- 금리가 Nasdaq에 왜 중요해?",
             "- ETH 변동",
+            "- 이번 주 경제일정",
             "- /price gold",
             "- /markets",
             "- /calendar",
+            "- /week",
             "",
             "가격·일정·시장 개념을 물어볼 수 있습니다.",
         ]
@@ -225,8 +268,29 @@ def answer_market_query(
     store: StateStore | None = None,
 ) -> str:
     normalized = _normalized(text)
+    if normalized.startswith("/help") or normalized in {
+        "도움말",
+        "사용법",
+        "사용법 알려줘",
+    }:
+        return _help()
+
+    asks_week = (
+        normalized.startswith("/week")
+        or "이번 주" in normalized
+        or "이번주" in normalized
+        or "주간 일정" in normalized
+        or "주간일정" in normalized
+    )
+    if asks_week and ("일정" in normalized or normalized.startswith("/week")):
+        now = datetime.now(KST)
+        events = fetch_economic_events(settings, days_ahead=7)
+        return _calendar_html(
+            _week_events(events, now),
+            title="이번 주 핵심 경제일정",
+        )
+
     if normalized.startswith("/calendar") or "경제일정" in normalized or normalized == "일정":
-        from datetime import datetime
 
         events = fetch_economic_events(settings, days_ahead=2)
         data = MarketData(
