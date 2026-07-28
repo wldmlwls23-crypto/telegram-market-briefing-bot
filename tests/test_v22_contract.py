@@ -275,7 +275,25 @@ def test_railway_and_python_runtime_are_pinned():
     assert railway["build"]["builder"] == "RAILPACK"
     assert railway["deploy"]["healthcheckPath"] == "/health"
     assert railway["deploy"]["sleepApplication"] is True
+    assert railway["deploy"]["limitOverride"]["containers"] == {
+        "cpu": 0.25,
+        "memoryBytes": 268435456,
+    }
     assert (root / ".python-version").read_text(encoding="utf-8").strip().startswith("3.12")
+
+
+def test_railway_cron_has_bounded_schedule_and_runtime():
+    root = Path(__file__).parents[1]
+    config = json.loads(
+        (root / "railway.cron.json").read_text(encoding="utf-8")
+    )
+    deploy = config["deploy"]
+
+    assert config["build"]["builder"] == "RAILPACK"
+    assert deploy["startCommand"] == "python -m jin_market_pulse.cron"
+    assert deploy["cronSchedule"] == "20,50 * * * *"
+    assert deploy["sleepApplication"] is False
+    assert deploy["restartPolicyType"] == "NEVER"
 
 
 def test_env_example_contains_only_placeholders():

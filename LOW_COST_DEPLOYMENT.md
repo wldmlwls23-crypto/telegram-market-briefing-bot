@@ -22,6 +22,10 @@
 
 ## Cron 서비스
 
+별도 `market-pulse-cron` 서비스의 Railway Config File은
+`/railway.cron.json`으로 지정합니다. 시작 명령과 UTC 스케줄, 자원 상한은
+이 파일에 고정되어 있습니다.
+
 ```text
 Start Command: python -m jin_market_pulse.cron
 Cron Schedule: 20,50 * * * *
