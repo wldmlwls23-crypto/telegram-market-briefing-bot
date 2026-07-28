@@ -6,6 +6,7 @@ import pytest
 
 from jin_market_pulse.providers import (
     critical_data_errors,
+    fetch_market_quotes,
     fetch_treasury_quotes,
     fetch_yahoo_quote,
 )
@@ -61,6 +62,36 @@ def test_critical_gate_requires_four_market_axes(market_data):
     assert critical_data_errors(market_data.quotes) == []
     market_data.quotes.pop("dxy")
     assert critical_data_errors(market_data.quotes) == ["DXY"]
+
+
+def test_market_quotes_uses_yahoo_when_coingecko_is_rate_limited(
+    monkeypatch,
+    settings,
+    market_data,
+):
+    fallback = {
+        "btc": market_data.quotes["btc"],
+        "eth": market_data.quotes["eth"],
+    }
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_crypto_quotes",
+        lambda _settings: (_ for _ in ()).throw(RuntimeError("429")),
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_yahoo_crypto_quotes",
+        lambda _settings: fallback,
+    )
+    monkeypatch.setattr("jin_market_pulse.providers.YAHOO_ASSETS", {})
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_treasury_quotes",
+        lambda _settings: {},
+    )
+
+    quotes, errors = fetch_market_quotes(settings)
+
+    assert quotes["btc"].current == market_data.quotes["btc"].current
+    assert quotes["eth"].current == market_data.quotes["eth"].current
+    assert any(error.startswith("CoinGecko:") for error in errors)
 
 
 def test_treasury_parses_latest_two_observations(monkeypatch, settings):

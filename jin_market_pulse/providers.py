@@ -34,6 +34,11 @@ YAHOO_ASSETS: dict[str, dict[str, str]] = {
     "wti": {"symbol": "CL=F", "name": "WTI 유가", "kind": "commodity", "unit": "USD"},
 }
 
+YAHOO_CRYPTO_ASSETS: dict[str, dict[str, str]] = {
+    "btc": {"symbol": "BTC-USD", "name": "BTC", "kind": "crypto", "unit": "USD"},
+    "eth": {"symbol": "ETH-USD", "name": "ETH", "kind": "crypto", "unit": "USD"},
+}
+
 FMP_SYMBOLS = {
     "sp500": "^GSPC",
     "nasdaq100": "^NDX",
@@ -163,6 +168,16 @@ def fetch_yahoo_quote(
     )
 
 
+def fetch_yahoo_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
+    result: dict[str, AssetQuote] = {}
+    for key, definition in YAHOO_CRYPTO_ASSETS.items():
+        quote = fetch_yahoo_quote(key, definition, settings)
+        quote.comparison_label = "previous UTC close"
+        if not quote.stale:
+            result[key] = quote
+    return result
+
+
 def fetch_fmp_quote(
     key: str,
     symbol: str,
@@ -218,7 +233,12 @@ def fetch_market_quotes(settings: Settings) -> tuple[dict[str, AssetQuote], list
         quotes.update(fetch_crypto_quotes(settings))
     except Exception as exc:
         errors.append(f"CoinGecko: {exc}")
-        logging.exception("CoinGecko quote fetch failed.")
+        logging.exception("CoinGecko quote fetch failed; using Yahoo crypto fallback.")
+        try:
+            quotes.update(fetch_yahoo_crypto_quotes(settings))
+        except Exception as fallback_exc:
+            errors.append(f"Yahoo crypto fallback: {fallback_exc}")
+            logging.exception("Yahoo crypto fallback failed.")
 
     def fetch_one(key: str, definition: dict[str, str]) -> AssetQuote:
         fmp_symbol = FMP_SYMBOLS.get(key)
