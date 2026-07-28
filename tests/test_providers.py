@@ -7,6 +7,7 @@ import pytest
 from jin_market_pulse.providers import (
     btc_quote_from_series,
     critical_data_errors,
+    fetch_asset_quote,
     fetch_btc_intraday_series,
     fetch_market_quotes,
     fetch_treasury_quotes,
@@ -178,3 +179,26 @@ def test_btc_quote_uses_same_twenty_four_hour_series_as_chart():
     assert quote.previous == 100000
     assert quote.percent_change == -3
     assert quote.comparison_label == "24시간 전"
+
+
+def test_single_crypto_lookup_uses_fast_yahoo_path(
+    monkeypatch,
+    settings,
+    market_data,
+):
+    calls = []
+
+    def fake_yahoo(key, definition, _settings):
+        calls.append((key, definition["symbol"]))
+        return market_data.quotes[key]
+
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_yahoo_quote",
+        fake_yahoo,
+    )
+
+    quote = fetch_asset_quote("eth", settings)
+
+    assert quote.key == "eth"
+    assert quote.comparison_label == "직전 UTC 종가"
+    assert calls == [("eth", "ETH-USD")]

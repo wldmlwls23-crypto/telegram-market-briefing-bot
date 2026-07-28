@@ -172,7 +172,7 @@ def fetch_yahoo_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
     result: dict[str, AssetQuote] = {}
     for key, definition in YAHOO_CRYPTO_ASSETS.items():
         quote = fetch_yahoo_quote(key, definition, settings)
-        quote.comparison_label = "previous UTC close"
+        quote.comparison_label = "직전 UTC 종가"
         if not quote.stale:
             result[key] = quote
     return result
@@ -296,6 +296,24 @@ def fetch_fmp_quote(
         return None
 
 
+def fetch_asset_quote(key: str, settings: Settings) -> AssetQuote:
+    if key in YAHOO_CRYPTO_ASSETS:
+        quote = fetch_yahoo_quote(key, YAHOO_CRYPTO_ASSETS[key], settings)
+        quote.comparison_label = "직전 UTC 종가"
+        return quote
+    if key in YAHOO_ASSETS:
+        definition = YAHOO_ASSETS[key]
+        fmp_symbol = FMP_SYMBOLS.get(key)
+        if fmp_symbol:
+            fmp_quote = fetch_fmp_quote(key, fmp_symbol, definition, settings)
+            if fmp_quote is not None:
+                return fmp_quote
+        return fetch_yahoo_quote(key, definition, settings)
+    if key in {"us2y", "us10y"}:
+        return fetch_treasury_quotes(settings)[key]
+    raise KeyError(f"Unsupported asset key: {key}")
+
+
 def fetch_market_quotes(settings: Settings) -> tuple[dict[str, AssetQuote], list[str]]:
     quotes: dict[str, AssetQuote] = {}
     errors: list[str] = []
@@ -303,7 +321,7 @@ def fetch_market_quotes(settings: Settings) -> tuple[dict[str, AssetQuote], list
         quotes.update(fetch_crypto_quotes(settings))
     except Exception as exc:
         errors.append(f"CoinGecko: {exc}")
-        logging.exception("CoinGecko quote fetch failed; using Yahoo crypto fallback.")
+        logging.warning("CoinGecko quote fetch failed; using Yahoo crypto fallback: %s", exc)
         try:
             quotes.update(fetch_yahoo_crypto_quotes(settings))
         except Exception as fallback_exc:

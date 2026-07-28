@@ -9,8 +9,8 @@ def test_natural_korean_asset_query_returns_verified_quote(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "jin_market_pulse.bot_queries.fetch_market_quotes",
-        lambda _settings: (market_data.quotes, []),
+        "jin_market_pulse.bot_queries.fetch_asset_quote",
+        lambda key, _settings: market_data.quotes[key],
     )
 
     answer = answer_market_query("이더리움 변동 알려줘", settings)

@@ -6,7 +6,7 @@ import re
 from .calendar import fetch_economic_events
 from .config import KST, Settings
 from .models import AssetQuote, EconomicEvent, MarketData
-from .providers import fetch_market_quotes
+from .providers import fetch_asset_quote, fetch_market_quotes
 from .reports import format_quote, select_future_events
 
 
@@ -134,9 +134,8 @@ def answer_market_query(text: str, settings: Settings) -> str:
 
     key = _asset_key(normalized)
     if key:
-        quotes, _ = fetch_market_quotes(settings)
-        quote = quotes.get(key)
-        if quote:
+        try:
+            quote = fetch_asset_quote(key, settings)
             return "\n".join(
                 [
                     f"<b>{html.escape(quote.name_ko)}</b>",
@@ -145,6 +144,8 @@ def answer_market_query(text: str, settings: Settings) -> str:
                     f"{html.escape(quote.source)}</i>",
                 ]
             )
+        except (KeyError, RuntimeError, ValueError):
+            pass
         return "<b>해당 자산의 최신 유효값이 없습니다.</b>"
 
     return _help()
