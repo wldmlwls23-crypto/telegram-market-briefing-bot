@@ -5,6 +5,10 @@
 __pycache__/
 *.py[cod]
 sent_alerts.json
+jin_market_pulse.sqlite3
+jin_market_pulse.sqlite3-*
+*.pre-sqlite.bak
+media-temp/
 .DS_Store
 *.zip
 *.7z

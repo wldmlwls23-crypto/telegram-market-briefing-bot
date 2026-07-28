@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from jin_market_pulse.calendar import fetch_economic_events
+from jin_market_pulse.calendar import (
+    _official_bea_events,
+    _official_bls_events,
+    fetch_economic_events,
+)
 from jin_market_pulse.config import KST
 
 
 class FakeCalendarResponse:
-    def __init__(self, payload):
+    def __init__(self, payload=None, text=""):
         self.payload = payload
+        self.text = text
 
     def raise_for_status(self):
         return None
@@ -96,3 +101,49 @@ def test_non_us_inflation_uses_country_market_axis(monkeypatch, settings):
     event = fetch_economic_events(settings, days_ahead=1)[0]
     assert "일본 통화·금리" in event.sensitivity_stronger
     assert "달러·미국채" not in event.sensitivity_stronger
+
+
+def test_bls_official_calendar_parses_high_impact_release(
+    monkeypatch,
+    settings,
+):
+    ical = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+DTSTART;TZID=US-Eastern:20260807T083000
+SUMMARY:Employment Situation
+END:VEVENT
+END:VCALENDAR"""
+    monkeypatch.setattr(
+        "jin_market_pulse.calendar.request",
+        lambda *args, **kwargs: FakeCalendarResponse(text=ical),
+    )
+
+    events = _official_bls_events(settings, None)
+
+    assert len(events) == 1
+    assert events[0]["source"] == "U.S. Bureau of Labor Statistics"
+    assert events[0]["date"].endswith("-04:00")
+
+
+def test_bea_official_schedule_parses_release_rows(
+    monkeypatch,
+    settings,
+):
+    body = """
+    <tr class="scheduled-releases-type-press">
+      <td><div class="release-date">August 4</div>
+      <small class="text-muted">8:30 AM</small></td>
+      <td class="release-title views-field views-field-field-scheduled-releases-type">
+        U.S. International Trade in Goods and Services, June 2026
+      </td>
+    </tr>
+    """
+    monkeypatch.setattr(
+        "jin_market_pulse.calendar.request",
+        lambda *args, **kwargs: FakeCalendarResponse(text=body),
+    )
+
+    events = _official_bea_events(settings, None)
+
+    assert len(events) == 1
+    assert events[0]["source"] == "U.S. Bureau of Economic Analysis"

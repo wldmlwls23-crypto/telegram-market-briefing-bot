@@ -1,253 +1,186 @@
-# JIN Market Pulse v2.1
+# JIN Market Pulse v2.2
 
-## Low-cost serverless mode
+한국인 개인 사용자가 Telegram 하나에서 아침 시장 파악, 실시간 가격 조회,
+경제일정, 움직임의 배경, 개인 가격 알림을 처리하는 서버리스 봇입니다.
 
-The production target is one morning report per day with Railway Serverless:
+기준 폴더는 `D:\Codex\JIN-Market-Pulse`입니다. C드라이브에 프로젝트 복제본을
+만들지 않습니다.
+
+## 자동으로 오는 메시지
+
+- 매일 `06:50 KST`: BTC 24시간 차트 1장과 2,000자 이하 모닝 리포트
+- 중요도 5성 지표: 60~90분 전 사전 알림과 실제 발표 후 결과·시장 반응
+- 긴급 뉴스: 공식 출처 1곳 또는 독립 매체 2곳과 유의미한 자산 움직임이 모두 확인될 때
+- 개인 가격 알림: 사용자가 직접 만든 조건을 30분마다 점검
+
+한국·유럽·미국 세션별 정기 리포트는 보내지 않습니다. 필요할 때 질문으로 조회합니다.
+
+## 질문 예시
+
+```text
+이더 얼마야
+비트 원화로
+새벽 3시 이후 비트
+미 10년물 변동
+비트랑 금 중 뭐가 더 올랐어?
+코스피 왜 떨어져?
+DXY가 뭐야?
+금리가 왜 Nasdaq에 중요해?
+오늘 일정
+이번 주 일정
+다음 주 일정
+비트 65000 아래면 알려줘
+내 알림 목록
+긴급 알림 꺼줘
+8시간 조용히
+앞으로 언제 메시지 와?
+```
+
+고정 버튼은 `현재 시장`, `오늘 일정`, `이번 주`, `왜 움직여?`, `최근 리포트`,
+`상태`입니다.
+
+명령 메뉴:
+
+```text
+/start /brief /price /compare /markets /calendar /week /last
+/alerts /mute /settings /status /reset /help
+```
+
+## 상담 원칙
+
+- 가격·변화율·발표 시각·예상·실제값은 코드가 공급원에서 직접 넣습니다.
+- DXY, CPI, PCE, FOMC, PMI, 국채금리, 실질금리, QE·QT, VIX, 펀딩비,
+  미결제약정은 내장 한국어 설명으로 즉시 답합니다.
+- 현재 원인은 `관찰 사실`, `확인된 원인`, `가능한 배경`, `반대 증거`로 나눕니다.
+- 직접 원인이 입증되지 않으면 가격 동행만 표시하고 원인이라고 단정하지 않습니다.
+- 매수·매도, 목표가, 수익 보장과 가격 예측은 제공하지 않습니다.
+- 이미지 질문은 하루 2회, 60초 이하 음성 질문은 하루 3회입니다.
+- AI 설명·현재 원인·이미지·음성·링크 검증을 합쳐 하루 5회로 제한합니다.
+
+## 데이터 원칙
+
+- BTC·ETH: CoinGecko, Yahoo Finance 교차 경로
+- 지수·외환·원자재: Yahoo Finance, FMP 키가 있을 때 선택적 보조
+- 미국채 2년·10년: U.S. Treasury, FRED 보조
+- 현재 주 경제일정: Forex Factory 공개 주간 JSON
+- 다음 주 중요 미국 일정: BLS·BEA 공식 일정
+- 뉴스 발견: Google News RSS
+- 뉴스 검증: 공식 출처 또는 서로 다른 신뢰 매체
+
+모든 자산은 현재값, 비교값, 변화, 기준 시각, 시장 상태, 출처, 신선도,
+실제 자산·대용 자산 여부를 구분합니다. 급변값이 보조 자산 방향과 맞지 않으면
+원인 분석과 긴급 알림에서 제외합니다.
+
+## 상태와 복구
+
+상태는 `/data/jin_market_pulse.sqlite3`에 SQLite WAL 방식으로 저장합니다.
+기존 `/data/sent_alerts.json`은 최초 실행 때 안전 이전하고
+`sent_alerts.json.pre-sqlite.bak`으로 보존합니다.
+
+저장 대상:
+
+- 모닝 리포트 차트·텍스트 단계
+- 경제지표 사전값·결과·정정
+- 뉴스 사건과 중복 방지
+- 개인 가격 알림
+- Telegram update 작업함
+- 24시간 대화 문맥
+- AI 사용량과 공급원 캐시·장애 상태
+
+웹훅은 update를 먼저 저장한 뒤 200을 반환합니다. 처리 중 중단되면 다음 tick이
+미완료 작업을 복구합니다.
+
+## 공개 인터페이스
+
+```text
+GET  /health
+GET  /ready
+POST /jobs/tick
+POST /jobs/morning
+POST /telegram/webhook
+```
+
+`/jobs/tick`과 `/jobs/morning`은 `Authorization: Bearer <CRON_SECRET>`을
+검증합니다. Telegram 웹훅은 `X-Telegram-Bot-Api-Secret-Token`과 허용된
+`TELEGRAM_CHAT_ID`를 모두 검증합니다.
+
+## Railway Variables
+
+비밀값:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+OPENAI_API_KEY
+CRON_SECRET
+TELEGRAM_WEBHOOK_SECRET
+```
+
+운영값:
 
 ```text
 RUN_MODE=serverless
 RUN_ON_START=false
-OPENAI_MODEL=gpt-5.6-luna
-OPENAI_REASONING_EFFORT=low
-OPENAI_MAX_OUTPUT_TOKENS=2500
-OPENAI_WEB_SEARCH=true
-ENABLE_EMERGENCY_ALERTS=false
-```
-
-GitHub Actions calls `POST /jobs/morning` at `06:50 KST`. The endpoint requires
-`Authorization: Bearer <CRON_SECRET>`. Store `CRON_SECRET` only in Railway
-Variables and GitHub Actions secrets. Store the Railway public service URL as
-the GitHub Actions secret `RAILWAY_JOB_URL`.
-
-This mode does not run real-time emergency or event monitoring. It keeps the
-service asleep outside the daily report job to target a low monthly bill.
-Provider usage and billing can vary, so the budget is a target rather than a
-guaranteed cap.
-
-The Telegram webhook also wakes the same serverless service only when the
-authorized chat asks for a numeric market lookup. These lookups do not call
-OpenAI.
-
-Common market definitions are answered from built-in Korean explanations.
-More complex educational relationship questions may use OpenAI up to the
-configured daily limit.
-
-한국어 Telegram 시장 브리핑 봇입니다. Railway의 백그라운드 worker로 실행됩니다.
-
-v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 정확성과 가독성입니다.
-
-## 현재 활성 기능
-
-- BTC 24시간 PNG 차트와 2,000자 이내 HTML 모닝 리포트
-- BTC와 ETH 현재가 및 24시간 변화
-- Nasdaq 100, S&P 500, Dow, KOSPI, KOSDAQ
-- DXY, 원/달러, WTI 유가, 금
-- 미국 재무부 공식 2년물과 10년물 금리
-- 중요 경제일정과 예상치, 이전치, 실제 발표값
-- 06:50 KST Morning Market Report
-- worker 모드에서 중요도 5성 이벤트 6시간 전 사전 알림
-- worker 모드에서 이벤트 발표 직전 시장 기준값 저장
-- worker 모드에서 실제 발표값과 발표 전후 시장 반응 업데이트
-- worker 모드에서 신뢰 가능한 출처 기반 긴급 알림
-- Railway Volume을 이용한 중복 방지 상태 유지
-- Telegram 조회: `/price`, `/markets`, `/calendar`, `/week` 및 자연어 질문
-
-한국, 유럽, 미국 세션별 리포트는 모닝 리포트 검증이 끝난 뒤 v2.1에서 순차 활성화합니다.
-
-## 데이터 원칙
-
-- BTC와 ETH: CoinGecko
-- 지수, 외환, 원자재: Yahoo Finance 보조 데이터
-- 미국채 2년물과 10년물: U.S. Department of the Treasury
-- 경제일정: Forex Factory calendar feed
-- 시장 뉴스: Google News RSS에서 신뢰 가능한 매체만 선별
-- 선택적 우선 공급원: Financial Modeling Prep
-
-모든 가격에는 비교 기준, 데이터 시각, 출처가 붙습니다. 핵심 데이터가 부족하면 GPT가 빈칸을 채우지 않고 `[시장 데이터 점검 알림]`을 보냅니다.
-
-## GitHub에 올리면 안 되는 파일
-
-- `.env`
-- 실제 OpenAI API Key
-- 실제 Telegram Bot Token
-- 실제 FMP API Key
-- `sent_alerts.json`
-- ZIP 또는 RAR 압축본
-- 로그 파일
-
-`.env.example`에는 예시값만 있으므로 GitHub에 올려도 됩니다.
-
-## Railway Variables
-
-필수:
-
-```text
-TELEGRAM_BOT_TOKEN=실제 값
-TELEGRAM_CHAT_ID=실제 값
-TELEGRAM_WEBHOOK_SECRET=별도의 긴 무작위 값
-ENABLE_AI_ADVISOR=true
-AI_ADVISOR_DAILY_LIMIT=5
-OPENAI_API_KEY=실제 값
-OPENAI_MODEL=gpt-5.6
-OPENAI_REASONING_EFFORT=medium
-OPENAI_WEB_SEARCH=true
-RUN_ON_START=false
 STATE_DIR=/data
 ENABLED_REPORTS=morning
-ENABLE_EMERGENCY_ALERTS=false
+ENABLE_EVENT_ALERTS=true
+ENABLE_EMERGENCY_ALERTS=true
+ENABLE_AI_ADVISOR=true
+AI_ADVISOR_DAILY_LIMIT=5
+AI_CURRENT_CAUSE_DAILY_LIMIT=3
+IMAGE_DAILY_LIMIT=2
+VOICE_DAILY_LIMIT=3
+MAX_PRICE_ALERTS=5
+OPENAI_MODEL=gpt-5.6-luna
+OPENAI_REASONING_EFFORT=low
+OPENAI_WEB_SEARCH=true
+PUBLIC_BASE_URL=https://서비스주소
+CRON_TARGET_URL=https://서비스주소
+DATA_CONTACT_EMAIL=personal-use@example.com
 REQUEST_TIMEOUT_SECONDS=25
 ```
 
-선택:
+배포 후 Telegram 명령 메뉴와 웹훅은 비밀값을 출력하지 않는 다음 명령으로
+등록합니다.
 
-```text
-FMP_API_KEY=
+```bash
+python -m jin_market_pulse.bootstrap
 ```
 
-비밀값은 Railway Variables에서만 관리합니다.
+`FMP_API_KEY`는 선택입니다. 실제 비밀값은 Railway Variables와 GitHub Actions
+Secrets에만 저장합니다.
 
-## Telegram 시장 상담
+## 저비용 배포
 
-허용된 `TELEGRAM_CHAT_ID`에서만 다음 조회를 사용할 수 있습니다.
+- 웹 서비스: Serverless, 1 Replica, `/data` Volume, 256MB, 0.25 vCPU
+- Cron 서비스: `20,50 * * * *` UTC, 시작 명령 `python -m jin_market_pulse.cron`
+- GitHub 백업: 매일 `06:58 KST`에 `/jobs/morning` 호출
+- 빌드: Railpack, Python 3.12
+- Healthcheck: `/health`
 
-```text
-비트 얼마야
-ETH 변동
-이더 가격 얼마야?
-코스피가 왜 떨어지는지 알려줘
-DXY가 뭐야?
-금리가 Nasdaq에 왜 중요해?
-/price gold
-/markets
-/calendar
-/week
-/help
-```
+목표는 Railway 월 `$0.75 이하`이며 실제 사용량에 따라 달라질 수 있습니다.
+비용 이메일 알림과 Workspace hard limit은 Railway 대시보드에서 별도로 확인합니다.
 
-지원 자산은 BTC, ETH, S&P 500, Nasdaq 100, Dow, DXY, 미국채 2년·10년,
-KOSPI, KOSDAQ, 원달러, WTI, 금입니다.
+## 보안
 
-- 가격·변동·일정: 검증된 공급원만 사용하며 OpenAI를 호출하지 않습니다.
-- 기본 용어: 내장된 한국어 설명으로 즉시 답합니다.
-- 자산 관계와 시장 원리: OpenAI를 하루 최대 5회 사용합니다.
-- 현재 움직임의 원인: 검증 가격·교차 자산·최근 신뢰 뉴스로 설명하며,
-  직접 원인과 가능한 배경을 구분합니다.
-- 매매 판단과 가격 전망: 제공하지 않습니다.
+GitHub에 올리면 안 되는 파일:
 
-`/calendar` 또는 `오늘 경제일정`은 앞으로 24시간의 핵심 일정을,
-`/week` 또는 `이번 주 경제일정`은 이번 주 남은 핵심 일정을 보여줍니다.
-각 일정은 발표 시간, 중요도, 예상·이전치, 의미와 상회·하회 해석을 포함합니다.
+- `.env`
+- 실제 API Key와 Telegram Token
+- `sent_alerts.json`
+- `jin_market_pulse.sqlite3`
+- 로그와 압축 백업본
 
-## Railway Volume 연결
+`.env.example`은 예시값만 있어 GitHub에 올려도 됩니다. 로그는 OpenAI Key,
+Telegram Token과 URL query 비밀값을 자동 마스킹합니다.
 
-중복 방지 기록을 재배포 후에도 유지하려면 Volume이 필요합니다.
-
-1. Railway에서 `telegram-market-briefing-bot` 서비스를 엽니다.
-2. 서비스에 Volume을 추가합니다.
-3. Mount Path를 `/data`로 설정합니다.
-4. Variables에서 `STATE_DIR=/data`인지 확인합니다.
-5. 저장하고 배포합니다.
-
-Volume을 연결하지 않아도 봇은 실행되지만 재배포하면 중복 기록이 초기화될 수 있습니다.
-
-## 첫 v2 테스트
-
-처음에는 긴급 알림을 끈 상태로 모닝 리포트 한 번만 확인합니다.
-
-1. Railway Variables에서 `ENABLE_EMERGENCY_ALERTS=false`를 확인합니다.
-2. `RUN_ON_START=true`로 바꿉니다.
-3. Apply 또는 Deploy를 누릅니다.
-4. Telegram에 v2 Morning Market Report가 한 번 오는지 확인합니다.
-5. Railway Logs에 `Morning Market Report sent successfully`가 있는지 확인합니다.
-6. 테스트가 끝나면 반드시 `RUN_ON_START=false`로 되돌립니다.
-7. 다시 Apply 또는 Deploy를 누릅니다.
-
-`RUN_ON_START=true`를 그대로 두면 재시작할 때마다 테스트 리포트가 반복됩니다.
-
-## 긴급 알림 활성화
-
-모닝 리포트를 먼저 확인한 뒤:
-
-```text
-ENABLE_EMERGENCY_ALERTS=true
-```
-
-로 변경하고 배포합니다.
-
-긴급 알림은 다음 조건을 모두 통과해야 합니다.
-
-- 공식 출처 한 곳 또는 서로 다른 신뢰 매체 두 곳 이상
-- 갑작스러운 시장 충격 후보
-- 같은 주제 6시간 내 재전송 아님
-- 최근 30분 동안 긴급 알림이 3건 미만
-- OpenAI의 최종 검증 통과
-
-## 로컬 검증
-
-공개 데이터 공급원만 확인:
+## 검증
 
 ```powershell
-python -m jin_market_pulse.smoke
-```
-
-단위 테스트:
-
-```powershell
-pytest -q
-```
-
-실제 공개 공급원까지 포함:
-
-```powershell
+.\.venv\Scripts\python.exe -m pytest -q
 $env:RUN_LIVE_TESTS='true'
-pytest -q
+.\.venv\Scripts\python.exe -m pytest -q tests/test_live_providers.py
 ```
 
-로컬 테스트에는 실제 Telegram Token이나 OpenAI API Key가 필요하지 않습니다. 실제 OpenAI 생성과 Telegram 전송은 Railway에서 확인합니다.
-
-## Morning Market Report 형식
-
-```text
-# Morning Market Report
-
-## 0. [Current Asset Snapshot]
-## 1. [Signal vs Noise]
-## 2. [Economic Calendar]
-## 3. [Market Pulse]
-## 4. [Indicator Sensitivity]
-## 5. [Today's Priority]
-```
-
-표, 파이프 문자, `N/A`, `확인 필요`, 매수와 매도 지시는 사용하지 않습니다. 메시지가 길면 문단 경계에서 `1/2`, `2/2`로 나누어 전송합니다.
-
-## 자동 실행
-
-Railway 시작 명령:
-
-```text
-python main.py
-```
-
-정규 Morning Market Report:
-
-```text
-매일 06:50 KST
-```
-
-이 서비스는 웹사이트가 아닌 worker이므로 Railway에서 `Unexposed service`라고 표시되어도 정상입니다.
-
-## 오류 확인
-
-Telegram 메시지가 오지 않으면 Railway의 `Deployments`에서 최신 배포가 성공했는지 확인하고 `View Logs`를 엽니다.
-
-주요 로그:
-
-```text
-JIN Market Pulse v2 started
-Morning Market Report sent successfully
-Morning report withheld
-OpenAI morning analysis failed
-Scheduled job failed
-```
-
-`Morning report withheld`는 핵심 공급원 데이터가 부족해 잘못된 리포트를 보내지 않았다는 뜻입니다.
+`tests/fixtures/user_scenarios.json`은 한국어 질문·오타·후속 질문 150개 이상을
+고정하며 결정형 라우팅은 100% 통과해야 합니다.

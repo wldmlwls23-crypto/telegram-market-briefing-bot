@@ -1,55 +1,49 @@
 # JIN Market Pulse 저비용 운영
 
-목표는 Railway 무료 서버리스와 하루 한 번의 OpenAI 호출을 사용해 월 비용을
-약 1~1.5달러 수준으로 줄이는 것입니다. 실제 청구액은 데이터 양과 공급자 정책에
-따라 달라질 수 있으므로 고정 상한은 아닙니다.
+## 목표 구조
 
-## 작동 방식
+1. 웹 서비스는 Telegram 요청과 예약 호출이 있을 때만 깨어납니다.
+2. `market-pulse-cron`이 매시 UTC 20분과 50분에 `/jobs/tick`을 호출하고 종료합니다.
+3. tick은 모닝, 5성 지표, 긴급 뉴스, 개인 가격 알림과 미처리 웹훅을 한 번 점검합니다.
+4. GitHub Actions는 매일 06:58 KST 모닝 백업만 담당합니다.
 
-1. 서비스는 평소에 잠든 상태로 유지됩니다.
-2. GitHub Actions가 매일 06:50 KST에 Railway 공개 주소를 호출합니다.
-3. Railway가 깨어나 모닝 리포트 한 건을 생성하고 Telegram으로 보냅니다.
-4. 작업이 끝나면 다시 유휴 상태가 됩니다.
+웹 서비스는 Serverless, 1 Replica, 256MB, 0.25 vCPU, `/data` Volume을
+유지합니다. `RUN_ON_START=false`이므로 재배포 자체가 Telegram 메시지를 만들지 않습니다.
 
-실시간 긴급 알림과 5~30분 간격의 이벤트 감시는 이 모드에서 실행하지 않습니다.
+## 비용 제어
 
-## Railway Variables
+- 운영 목표: 월 `$0.75 이하`
+- 이메일 알림: `$0.75`
+- Compute hard limit: 대시보드에서 설정 가능한 `$1 이하 최저값`
+- OpenAI: `gpt-5.6-luna`, reasoning `low`, user AI 요청 합계 하루 5회
+- 이미지 2회, 음성 3회, 현재 원인 웹 검증 3회 이내
 
-```text
-RUN_MODE=serverless
-RUN_ON_START=false
-STATE_DIR=/data
-ENABLED_REPORTS=morning
-ENABLE_EMERGENCY_ALERTS=false
-OPENAI_MODEL=gpt-5.6-luna
-OPENAI_REASONING_EFFORT=low
-OPENAI_MAX_OUTPUT_TOKENS=2500
-OPENAI_WEB_SEARCH=true
-CRON_SECRET=길고 무작위인 비밀값
-TELEGRAM_WEBHOOK_SECRET=CRON_SECRET과 다른 긴 무작위 값
-ENABLE_AI_ADVISOR=true
-AI_ADVISOR_DAILY_LIMIT=5
-```
+실제 비용은 Railway 정책과 사용량에 따라 달라지므로 고정 보장은 아닙니다.
 
-기존 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `OPENAI_API_KEY`는 그대로
-Railway Variables에만 보관합니다. Volume의 Mount Path는 `/data`를 유지합니다.
-
-Telegram 숫자 조회는 웹훅 요청이 들어올 때만 서비스를 깨우고 OpenAI를 호출하지
-않습니다. 기본 시장 용어도 내장 설명으로 처리합니다. 복잡한 관계 설명만 하루
-최대 5회 OpenAI를 사용하며 장시간 실행되는 polling worker는 추가하지 않습니다.
-
-## GitHub Actions secrets
+## Cron 서비스
 
 ```text
-RAILWAY_JOB_URL=https://Railway에서-생성한-도메인
-CRON_SECRET=Railway와-같은-비밀값
+Start Command: python -m jin_market_pulse.cron
+Cron Schedule: 20,50 * * * *
+CRON_TARGET_URL=https://telegram-market-briefing-bot-production.up.railway.app
+CRON_SECRET=웹 서비스와 같은 값
 ```
 
-워크플로 파일은 `.github/workflows/morning-report.yml`입니다. GitHub 예약 실행은
-혼잡할 때 몇 분 늦어질 수 있습니다.
+Railway Cron은 UTC 기준입니다. 한 실행은 90초 안에 끝나며 이전 실행이 겹치면
+다음 실행을 중복 수행하지 않도록 idempotency key를 사용합니다.
 
-## 안전한 테스트
+## 수동 테스트
 
-GitHub의 `Actions`에서 `Morning Market Report`를 선택한 뒤 `Run workflow`를
-한 번 누릅니다. Telegram 수신과 Railway 로그를 확인합니다. 테스트 중복 전송을
-막기 위해 Railway의 `RUN_ON_START`는 계속 `false`로 둡니다.
+`RUN_ON_START`를 바꾸지 않습니다. 별도의 idempotency key로 한 번 호출합니다.
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$env:PUBLIC_BASE_URL/jobs/morning" `
+  -Headers @{
+    Authorization = "Bearer $env:CRON_SECRET"
+    "X-Idempotency-Key" = "manual-v22-test"
+  }
+```
+
+비밀값은 명령 기록이나 문서에 직접 적지 않습니다.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,7 +12,9 @@ from urllib.parse import quote as url_quote
 import requests
 
 from .config import KST, Settings
+from .http_client import request
 from .models import AssetQuote, PricePoint, PriceSeries
+from .state import StateStore
 
 
 UTC = timezone.utc
@@ -21,6 +25,7 @@ TREASURY_XML_URL = (
     "interest-rates/pages/xml"
 )
 FMP_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
+FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 YAHOO_ASSETS: dict[str, dict[str, str]] = {
     "sp500": {"symbol": "^GSPC", "name": "S&P 500", "kind": "index", "unit": "pt"},
@@ -46,6 +51,30 @@ FMP_SYMBOLS = {
     "usdkrw": "USDKRW",
     "gold": "GCUSD",
     "wti": "CLUSD",
+}
+
+PROXY_ASSETS: dict[str, dict[str, str]] = {
+    "sp500": {"symbol": "SPY", "name": "S&P 500 대용 ETF", "kind": "index", "unit": "USD"},
+    "nasdaq100": {"symbol": "QQQ", "name": "Nasdaq 100 대용 ETF", "kind": "index", "unit": "USD"},
+    "dow": {"symbol": "DIA", "name": "Dow 대용 ETF", "kind": "index", "unit": "USD"},
+    "dxy": {"symbol": "UUP", "name": "달러 대용 ETF", "kind": "fx", "unit": "USD"},
+    "kospi": {"symbol": "EWY", "name": "한국 주식 대용 ETF", "kind": "index", "unit": "USD"},
+    "wti": {"symbol": "USO", "name": "WTI 대용 ETF", "kind": "commodity", "unit": "USD"},
+    "gold": {"symbol": "GLD", "name": "금 대용 ETF", "kind": "commodity", "unit": "USD"},
+}
+
+OUTLIER_THRESHOLDS = {
+    "btc": 8.0,
+    "eth": 10.0,
+    "sp500": 3.0,
+    "nasdaq100": 3.0,
+    "dow": 3.0,
+    "kospi": 3.0,
+    "kosdaq": 3.0,
+    "dxy": 0.7,
+    "usdkrw": 2.0,
+    "wti": 5.0,
+    "gold": 5.0,
 }
 
 
@@ -79,17 +108,19 @@ def _is_stale(as_of: datetime, kind: str, market_state: str) -> bool:
 
 
 def fetch_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
-    response = _session().get(
+    response = request(
+        "GET",
         COINGECKO_URL,
+        settings,
+        provider="coingecko",
         params={
             "ids": "bitcoin,ethereum",
             "vs_currencies": "usd",
             "include_24hr_change": "true",
             "include_last_updated_at": "true",
         },
-        timeout=settings.request_timeout_seconds,
+        session=_session(),
     )
-    response.raise_for_status()
     payload = response.json()
     result: dict[str, AssetQuote] = {}
     definitions = {
@@ -130,12 +161,14 @@ def fetch_yahoo_quote(
     settings: Settings,
 ) -> AssetQuote:
     symbol = url_quote(definition["symbol"], safe="")
-    response = _session().get(
+    response = request(
+        "GET",
         YAHOO_CHART_URL.format(symbol=symbol),
+        settings,
+        provider="yahoo",
         params={"range": "5d", "interval": "1d", "includePrePost": "true"},
-        timeout=settings.request_timeout_seconds,
+        session=_session(),
     )
-    response.raise_for_status()
     result = response.json()["chart"]["result"][0]
     meta = result["meta"]
     current_raw = meta.get("regularMarketPrice")
@@ -183,12 +216,14 @@ def _fetch_yahoo_intraday(
     *,
     interval: str,
 ) -> PriceSeries:
-    response = _session().get(
+    response = request(
+        "GET",
         YAHOO_CHART_URL.format(symbol="BTC-USD"),
+        settings,
+        provider="yahoo",
         params={"range": "2d", "interval": interval, "includePrePost": "true"},
-        timeout=settings.request_timeout_seconds,
+        session=_session(),
     )
-    response.raise_for_status()
     result = response.json()["chart"]["result"][0]
     timestamps = result.get("timestamp") or []
     closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
@@ -257,12 +292,14 @@ def fetch_fmp_quote(
     if not settings.fmp_api_key:
         return None
     try:
-        response = _session().get(
+        response = request(
+            "GET",
             FMP_QUOTE_URL,
+            settings,
+            provider="fmp",
             params={"symbol": symbol, "apikey": settings.fmp_api_key},
-            timeout=settings.request_timeout_seconds,
+            session=_session(),
         )
-        response.raise_for_status()
         payload = response.json()
         item = payload[0] if isinstance(payload, list) and payload else payload
         if not isinstance(item, dict) or item.get("price") is None:
@@ -296,37 +333,141 @@ def fetch_fmp_quote(
         return None
 
 
-def fetch_asset_quote(key: str, settings: Settings) -> AssetQuote:
-    if key in YAHOO_CRYPTO_ASSETS:
-        quote = fetch_yahoo_quote(key, YAHOO_CRYPTO_ASSETS[key], settings)
-        quote.comparison_label = "직전 UTC 종가"
+def _quote_ttl_seconds(quote: AssetQuote) -> int:
+    if quote.kind == "crypto":
+        return 15 * 60
+    if quote.kind == "yield":
+        return 24 * 60 * 60
+    return 30 * 60
+
+
+def _cache_quote(store: StateStore | None, quote: AssetQuote) -> None:
+    if store is None or quote.stale:
+        return
+    store.cache_set(
+        f"quote:{quote.key}",
+        quote.model_dump(mode="json"),
+        source=quote.source,
+        ttl_seconds=_quote_ttl_seconds(quote),
+    )
+
+
+def _cached_quote(
+    store: StateStore | None,
+    key: str,
+    *,
+    max_stale_seconds: int = 4 * 24 * 60 * 60,
+) -> AssetQuote | None:
+    if store is None:
+        return None
+    cached = store.cache_get(
+        f"quote:{key}",
+        max_stale_seconds=max_stale_seconds,
+    )
+    if not cached or not isinstance(cached.get("payload"), dict):
+        return None
+    try:
+        quote = AssetQuote.model_validate(cached["payload"])
+    except Exception:
+        return None
+    flags = list(quote.quality_flags)
+    if "cached" not in flags:
+        flags.append("cached")
+    return quote.model_copy(
+        update={
+            "source": f"{quote.source} · 마지막 정상값",
+            "stale": bool(cached["stale"]),
+            "quality_flags": flags,
+        }
+    )
+
+
+def _record_provider(
+    store: StateStore | None,
+    provider: str,
+    *,
+    success: bool,
+    error: Exception | None = None,
+) -> None:
+    if store is None:
+        return
+    store.record_provider_result(
+        provider,
+        success=success,
+        error=type(error).__name__ if error else "",
+    )
+
+
+def fetch_asset_quote(
+    key: str,
+    settings: Settings,
+    store: StateStore | None = None,
+) -> AssetQuote:
+    try:
+        if key in YAHOO_CRYPTO_ASSETS:
+            quote = fetch_yahoo_quote(key, YAHOO_CRYPTO_ASSETS[key], settings)
+            quote.comparison_label = "직전 UTC 종가"
+        elif key in YAHOO_ASSETS:
+            definition = YAHOO_ASSETS[key]
+            fmp_symbol = FMP_SYMBOLS.get(key)
+            quote = (
+                fetch_fmp_quote(key, fmp_symbol, definition, settings)
+                if fmp_symbol
+                else None
+            ) or fetch_yahoo_quote(key, definition, settings)
+        elif key in {"us2y", "us10y"}:
+            try:
+                quote = fetch_treasury_quotes(settings)[key]
+            except Exception:
+                quote = fetch_fred_treasury_quotes(settings)[key]
+        else:
+            raise KeyError(f"Unsupported asset key: {key}")
+        _cache_quote(store, quote)
+        _record_provider(store, quote.source, success=True)
         return quote
-    if key in YAHOO_ASSETS:
-        definition = YAHOO_ASSETS[key]
-        fmp_symbol = FMP_SYMBOLS.get(key)
-        if fmp_symbol:
-            fmp_quote = fetch_fmp_quote(key, fmp_symbol, definition, settings)
-            if fmp_quote is not None:
-                return fmp_quote
-        return fetch_yahoo_quote(key, definition, settings)
-    if key in {"us2y", "us10y"}:
-        return fetch_treasury_quotes(settings)[key]
-    raise KeyError(f"Unsupported asset key: {key}")
+    except Exception as exc:
+        cached = _cached_quote(store, key)
+        if cached is not None:
+            _record_provider(store, "market_data", success=False, error=exc)
+            return cached
+        raise
 
 
-def fetch_market_quotes(settings: Settings) -> tuple[dict[str, AssetQuote], list[str]]:
+def fetch_market_quotes(
+    settings: Settings,
+    store: StateStore | None = None,
+) -> tuple[dict[str, AssetQuote], list[str]]:
     quotes: dict[str, AssetQuote] = {}
     errors: list[str] = []
     try:
-        quotes.update(fetch_crypto_quotes(settings))
+        crypto_quotes = fetch_crypto_quotes(settings)
+        quotes.update(crypto_quotes)
+        for quote in crypto_quotes.values():
+            _cache_quote(store, quote)
+        _record_provider(store, "CoinGecko", success=True)
     except Exception as exc:
         errors.append(f"CoinGecko: {exc}")
+        _record_provider(store, "CoinGecko", success=False, error=exc)
         logging.warning("CoinGecko quote fetch failed; using Yahoo crypto fallback: %s", exc)
         try:
-            quotes.update(fetch_yahoo_crypto_quotes(settings))
+            crypto_quotes = fetch_yahoo_crypto_quotes(settings)
+            quotes.update(crypto_quotes)
+            for quote in crypto_quotes.values():
+                _cache_quote(store, quote)
+            _record_provider(store, "Yahoo Finance", success=True)
         except Exception as fallback_exc:
             errors.append(f"Yahoo crypto fallback: {fallback_exc}")
+            _record_provider(
+                store,
+                "Yahoo Finance",
+                success=False,
+                error=fallback_exc,
+            )
             logging.exception("Yahoo crypto fallback failed.")
+            for key in YAHOO_CRYPTO_ASSETS:
+                cached = _cached_quote(store, key)
+                if cached is not None:
+                    quotes[key] = cached
 
     def fetch_one(key: str, definition: dict[str, str]) -> AssetQuote:
         fmp_symbol = FMP_SYMBOLS.get(key)
@@ -347,17 +488,46 @@ def fetch_market_quotes(settings: Settings) -> tuple[dict[str, AssetQuote], list
                 quote = future.result()
                 if not quote.stale:
                     quotes[key] = quote
+                    _cache_quote(store, quote)
                 else:
                     errors.append(f"{key}: stale data at {quote.as_of.isoformat()}")
             except Exception as exc:
                 errors.append(f"{key}: {exc}")
                 logging.exception("Market quote fetch failed for %s.", key)
+                cached = _cached_quote(store, key)
+                if cached is not None:
+                    quotes[key] = cached
 
     try:
-        quotes.update(fetch_treasury_quotes(settings))
+        treasury = fetch_treasury_quotes(settings)
+        quotes.update(treasury)
+        for quote in treasury.values():
+            _cache_quote(store, quote)
+        _record_provider(store, "U.S. Department of the Treasury", success=True)
     except Exception as exc:
         errors.append(f"US Treasury: {exc}")
-        logging.exception("US Treasury quote fetch failed.")
+        _record_provider(
+            store,
+            "U.S. Department of the Treasury",
+            success=False,
+            error=exc,
+        )
+        logging.warning("US Treasury quote fetch failed; trying FRED fallback.")
+        try:
+            treasury = fetch_fred_treasury_quotes(settings)
+            quotes.update(treasury)
+            for quote in treasury.values():
+                _cache_quote(store, quote)
+            _record_provider(store, "FRED", success=True)
+        except Exception as fallback_exc:
+            errors.append(f"FRED Treasury fallback: {fallback_exc}")
+            _record_provider(store, "FRED", success=False, error=fallback_exc)
+            for key in ("us2y", "us10y"):
+                cached = _cached_quote(store, key, max_stale_seconds=7 * 24 * 3600)
+                if cached is not None:
+                    quotes[key] = cached
+
+    _verify_outlier_directions(quotes, settings, errors)
     return quotes, errors
 
 
@@ -367,24 +537,16 @@ def fetch_treasury_quotes(settings: Settings) -> dict[str, AssetQuote]:
         "data": "daily_treasury_yield_curve",
         "field_tdr_date_value": str(year),
     }
-    session = _session()
-    response: requests.Response | None = None
-    last_error: requests.RequestException | None = None
-    for attempt in range(2):
-        try:
-            response = session.get(
-                TREASURY_XML_URL,
-                params=params,
-                timeout=max(settings.request_timeout_seconds, 10),
-            )
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-            if attempt == 0:
-                logging.warning("US Treasury request delayed; retrying once.")
-    if response is None:
-        raise RuntimeError("US Treasury request failed after retry") from last_error
-    response.raise_for_status()
+    response = request(
+        "GET",
+        TREASURY_XML_URL,
+        settings,
+        provider="us_treasury",
+        attempts=2,
+        timeout=max(settings.request_timeout_seconds, 10),
+        params=params,
+        session=_session(),
+    )
     root = ET.fromstring(response.content)
     ns = {
         "atom": "http://www.w3.org/2005/Atom",
@@ -434,6 +596,131 @@ def fetch_treasury_quotes(settings: Settings) -> dict[str, AssetQuote]:
     return {key: value for key, value in result.items() if not value.stale}
 
 
+def fetch_fred_treasury_quotes(settings: Settings) -> dict[str, AssetQuote]:
+    response = request(
+        "GET",
+        FRED_CSV_URL,
+        settings,
+        provider="fred",
+        params={"id": "DGS2,DGS10"},
+        attempts=3,
+        session=_session(),
+    )
+    text = getattr(response, "text", "")
+    if not text:
+        text = response.content.decode("utf-8-sig")
+    rows: list[dict[str, str]] = []
+    for row in csv.DictReader(io.StringIO(text)):
+        date_value = row.get("DATE") or row.get("observation_date") or ""
+        dgs2 = (row.get("DGS2") or "").strip()
+        dgs10 = (row.get("DGS10") or "").strip()
+        if date_value and dgs2 not in {"", "."} and dgs10 not in {"", "."}:
+            rows.append({"date": date_value, "DGS2": dgs2, "DGS10": dgs10})
+    if len(rows) < 2:
+        raise RuntimeError("FRED returned fewer than two complete observations")
+    current_row, previous_row = rows[-1], rows[-2]
+    as_of_date = date.fromisoformat(current_row["date"][:10])
+    as_of = datetime.combine(as_of_date, time(17, 0), tzinfo=KST)
+    definitions = {
+        "us2y": ("미국채 2년물", "DGS2"),
+        "us10y": ("미국채 10년물", "DGS10"),
+    }
+    result: dict[str, AssetQuote] = {}
+    for key, (name, field) in definitions.items():
+        current = float(current_row[field])
+        previous = float(previous_row[field])
+        absolute, percent = _changes(current, previous)
+        result[key] = AssetQuote(
+            key=key,
+            name_ko=name,
+            kind="yield",
+            current=current,
+            previous=previous,
+            absolute_change=absolute,
+            percent_change=percent,
+            as_of=as_of,
+            market_state="OFFICIAL_DAILY",
+            source="FRED",
+            comparison_label="직전 고시",
+            stale=datetime.now(KST) - as_of > timedelta(days=7),
+            unit="%",
+        )
+    return {key: quote for key, quote in result.items() if not quote.stale}
+
+
+def _same_direction(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return False
+    if abs(left) < 0.01 or abs(right) < 0.01:
+        return True
+    return (left > 0) == (right > 0)
+
+
+def _verify_outlier_directions(
+    quotes: dict[str, AssetQuote],
+    settings: Settings,
+    errors: list[str],
+) -> None:
+    """Prevent anomalous provider values from becoming asserted causes."""
+    for key, threshold in OUTLIER_THRESHOLDS.items():
+        quote = quotes.get(key)
+        if quote is None or quote.percent_change is None:
+            continue
+        if abs(quote.percent_change) < threshold:
+            continue
+        try:
+            if key in YAHOO_CRYPTO_ASSETS and quote.source != "Yahoo Finance":
+                verifier = fetch_yahoo_quote(key, YAHOO_CRYPTO_ASSETS[key], settings)
+            elif key in PROXY_ASSETS:
+                verifier = fetch_yahoo_quote(
+                    f"{key}_proxy",
+                    PROXY_ASSETS[key],
+                    settings,
+                )
+            else:
+                quote.verified = False
+                quote.quality_flags.append("급변 교차검증 공급원 없음")
+                continue
+            if _same_direction(quote.percent_change, verifier.percent_change):
+                quote.quality_flags.append(f"방향 교차검증: {verifier.name_ko}")
+            else:
+                quote.verified = False
+                quote.quality_flags.append(f"급변 방향 불일치: {verifier.name_ko}")
+                errors.append(f"{key}: outlier direction mismatch")
+        except Exception as exc:
+            quote.verified = False
+            quote.quality_flags.append("급변 교차검증 실패")
+            errors.append(f"{key}: outlier verification failed ({type(exc).__name__})")
+
+    yield_quotes = [
+        quote
+        for key in ("us2y", "us10y")
+        if (quote := quotes.get(key))
+        and quote.absolute_change is not None
+        and abs(quote.absolute_change * 100) >= 10
+    ]
+    if not yield_quotes:
+        return
+    try:
+        verifier_quotes = fetch_fred_treasury_quotes(settings)
+    except Exception as exc:
+        for quote in yield_quotes:
+            quote.verified = False
+            quote.quality_flags.append("금리 급변 교차검증 실패")
+        errors.append(f"yield outlier verification failed ({type(exc).__name__})")
+        return
+    for quote in yield_quotes:
+        verifier = verifier_quotes.get(quote.key)
+        if verifier and _same_direction(
+            quote.absolute_change,
+            verifier.absolute_change,
+        ):
+            quote.quality_flags.append("FRED 방향 교차검증")
+        else:
+            quote.verified = False
+            quote.quality_flags.append("FRED 금리 방향 불일치")
+
+
 def critical_data_errors(quotes: dict[str, AssetQuote]) -> list[str]:
     missing: list[str] = []
     for key, label in {
@@ -441,9 +728,13 @@ def critical_data_errors(quotes: dict[str, AssetQuote]) -> list[str]:
         "nasdaq100": "Nasdaq 100",
         "dxy": "DXY",
     }.items():
-        if key not in quotes:
+        quote = quotes.get(key)
+        if quote is None or quote.stale or not quote.verified:
             missing.append(label)
-    if not ({"us2y", "us10y"} & quotes.keys()):
+    if not any(
+        key in quotes and not quotes[key].stale and quotes[key].verified
+        for key in ("us2y", "us10y")
+    ):
         missing.append("미국채 금리")
     return missing
 

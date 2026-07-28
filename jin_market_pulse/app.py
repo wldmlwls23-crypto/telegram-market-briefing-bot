@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import sys
 from datetime import datetime
 
@@ -34,23 +36,62 @@ from .state import StateStore
 from .telegram import TelegramClient
 
 
+def _redact(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    patterns = (
+        (r"\bsk-[A-Za-z0-9_-]{12,}\b", "[OPENAI_KEY]"),
+        (r"\bbot\d+:[A-Za-z0-9_-]{12,}\b", "bot[TELEGRAM_TOKEN]"),
+        (
+            r"(?i)(apikey|api_key|token|secret)=([^&\s]+)",
+            r"\1=[REDACTED]",
+        ),
+    )
+    for pattern, replacement in patterns:
+        value = re.sub(pattern, replacement, value)
+    return value
+
+
+class SensitiveDataFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(value) for value in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: _redact(value)
+                for key, value in record.args.items()
+            }
+        return True
+
+
 def setup_logging() -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.addFilter(SensitiveDataFilter())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[handler],
+        force=True,
     )
 
 
 class MarketPulseApp:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.state = StateStore(settings.state_file)
+        self.state = StateStore(
+            settings.state_db,
+            legacy_json=settings.state_file,
+        )
         self.telegram = TelegramClient(settings)
 
     def collect_morning_data(self) -> MarketData:
-        quotes, errors = fetch_market_quotes(self.settings)
-        events = fetch_economic_events(self.settings, days_ahead=4)
+        quotes, errors = fetch_market_quotes(self.settings, self.state)
+        events = fetch_economic_events(
+            self.settings,
+            days_ahead=4,
+            store=self.state,
+        )
         news = fetch_news()
         btc_series = None
         try:
@@ -68,12 +109,32 @@ class MarketPulseApp:
             errors=errors,
         )
 
-    def send_morning_report(self) -> str:
+    def send_morning_report(
+        self,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
+        delivery_key = (
+            f"morning:{idempotency_key}"
+            if idempotency_key
+            else f"morning:{datetime.now(KST):%Y-%m-%d}"
+        )
+        if not self.state.claim_job(delivery_key, lease_seconds=15 * 60):
+            return "duplicate"
         try:
             data = self.collect_morning_data()
             missing = critical_data_errors(data.quotes)
             if missing:
-                self.telegram.send(render_data_health_alert(missing, data.errors))
+                if not self.state.delivery_sent(delivery_key, "health"):
+                    message_ids = self.telegram.send(
+                        render_data_health_alert(missing, data.errors)
+                    )
+                    self.state.mark_delivery(
+                        delivery_key,
+                        "health",
+                        telegram_message_id=message_ids[0] if message_ids else None,
+                    )
+                self.state.finish_job(delivery_key, success=True)
                 logging.error("Morning report withheld. Missing critical data: %s", missing)
                 return "withheld"
             try:
@@ -82,16 +143,42 @@ class MarketPulseApp:
                 logging.exception("OpenAI morning analysis failed; using data-only fallback.")
                 analysis = fallback_morning_analysis(data)
             report = render_morning_report(data, analysis)
-            if data.btc_series:
+            if data.btc_series and not self.state.delivery_sent(delivery_key, "chart"):
                 try:
-                    self.telegram.send_photo(render_btc_chart(data.btc_series))
+                    message_id = self.telegram.send_photo(
+                        render_btc_chart(data.btc_series)
+                    )
+                    self.state.mark_delivery(
+                        delivery_key,
+                        "chart",
+                        telegram_message_id=message_id,
+                    )
                 except Exception:
                     logging.exception("BTC chart send failed; continuing with text report.")
-            self.telegram.send(report, parse_mode="HTML")
+            if not self.state.delivery_sent(delivery_key, "text"):
+                message_ids = self.telegram.send(
+                    report,
+                    parse_mode="HTML",
+                )
+                self.state.mark_delivery(
+                    delivery_key,
+                    "text",
+                    telegram_message_id=message_ids[0] if message_ids else None,
+                    content_hash=hashlib.sha256(
+                        report.encode("utf-8")
+                    ).hexdigest(),
+                )
             self.state.add_market_snapshot(data.quotes)
+            self.state.save_message(delivery_key, report, parse_mode="HTML")
+            self.state.finish_job(delivery_key, success=True)
             logging.info("Morning Market Report sent successfully.")
             return "sent"
-        except Exception:
+        except Exception as exc:
+            self.state.finish_job(
+                delivery_key,
+                success=False,
+                error=type(exc).__name__,
+            )
             logging.exception("Morning Market Report failed.")
             raise
 

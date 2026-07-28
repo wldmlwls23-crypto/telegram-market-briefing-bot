@@ -39,17 +39,29 @@ class Settings:
     enable_emergency_alerts: bool
     run_on_start: bool
     request_timeout_seconds: int
-    run_mode: str = "worker"
+    run_mode: str = "serverless"
+    enable_event_alerts: bool = True
     cron_secret: str = ""
     telegram_webhook_secret: str = ""
     enable_ai_advisor: bool = True
     ai_advisor_daily_limit: int = 5
+    ai_current_cause_daily_limit: int = 3
+    image_daily_limit: int = 2
+    voice_daily_limit: int = 3
+    max_price_alerts: int = 5
+    public_base_url: str = ""
+    cron_target_url: str = ""
+    data_contact_email: str = "personal-use@example.com"
     port: int = 8000
     openai_max_output_tokens: int = 2500
 
     @property
     def state_file(self) -> Path:
         return self.state_dir / "sent_alerts.json"
+
+    @property
+    def state_db(self) -> Path:
+        return self.state_dir / "jin_market_pulse.sqlite3"
 
     @classmethod
     def from_env(cls, *, require_secrets: bool = True) -> "Settings":
@@ -73,9 +85,10 @@ class Settings:
             state_dir=state_dir,
             enabled_reports=env_csv("ENABLED_REPORTS", "morning"),
             enable_emergency_alerts=env_bool("ENABLE_EMERGENCY_ALERTS", False),
+            enable_event_alerts=env_bool("ENABLE_EVENT_ALERTS", True),
             run_on_start=env_bool("RUN_ON_START", False),
             request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25")),
-            run_mode=os.getenv("RUN_MODE", "worker").strip().lower(),
+            run_mode=os.getenv("RUN_MODE", "serverless").strip().lower(),
             cron_secret=os.getenv("CRON_SECRET", "").strip(),
             telegram_webhook_secret=os.getenv(
                 "TELEGRAM_WEBHOOK_SECRET", ""
@@ -84,6 +97,18 @@ class Settings:
             ai_advisor_daily_limit=int(
                 os.getenv("AI_ADVISOR_DAILY_LIMIT", "5")
             ),
+            ai_current_cause_daily_limit=int(
+                os.getenv("AI_CURRENT_CAUSE_DAILY_LIMIT", "3")
+            ),
+            image_daily_limit=int(os.getenv("IMAGE_DAILY_LIMIT", "2")),
+            voice_daily_limit=int(os.getenv("VOICE_DAILY_LIMIT", "3")),
+            max_price_alerts=int(os.getenv("MAX_PRICE_ALERTS", "5")),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+            cron_target_url=os.getenv("CRON_TARGET_URL", "").strip().rstrip("/"),
+            data_contact_email=os.getenv(
+                "DATA_CONTACT_EMAIL",
+                "personal-use@example.com",
+            ).strip(),
             port=int(os.getenv("PORT", "8000")),
             openai_max_output_tokens=int(
                 os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2500")

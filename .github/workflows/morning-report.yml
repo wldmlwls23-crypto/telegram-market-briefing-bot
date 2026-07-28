@@ -2,7 +2,7 @@ name: Morning Market Report
 
 on:
   schedule:
-    - cron: "50 21 * * *"
+    - cron: "58 21 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -25,4 +25,5 @@ jobs:
             --max-time 600 \
             --request POST \
             --header "Authorization: Bearer $CRON_SECRET" \
+            --header "X-Idempotency-Key: github-$(date -u +%F)" \
             "$RAILWAY_JOB_URL/jobs/morning"

@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import requests
 
-from .config import KST, Settings
+from .config import KST, NEW_YORK, Settings
+from .http_client import ProviderRequestError, request
 from .models import EconomicEvent
+from .state import StateStore
 
 
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
+BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 CORE_COUNTRIES = {"USD", "KRW", "CNY", "EUR", "JPY"}
 FIVE_STAR_TERMS = {
     "consumer price",
@@ -23,6 +30,7 @@ FIVE_STAR_TERMS = {
     "non-farm employment",
     "nonfarm payrolls",
     "jobs report",
+    "employment situation",
 }
 FOUR_STAR_TERMS = {
     "jobless claims",
@@ -85,6 +93,22 @@ TITLE_KO = {
     "treasury auction": "미국채 입찰",
     "retail sales": "소매판매",
     "ppi": "생산자물가지수(PPI)",
+    "employment situation": "미국 고용보고서",
+    "job openings and labor turnover": "미국 구인·이직 보고서(JOLTS)",
+    "employment cost index": "미국 고용비용지수",
+    "producer price index": "생산자물가지수(PPI)",
+    "personal income and outlays": "미국 개인소득·소비(PCE)",
+    "international trade in goods and services": "미국 무역수지",
+}
+
+OFFICIAL_RELEASE_TERMS = {
+    "employment situation": "High",
+    "consumer price index": "High",
+    "producer price index": "High",
+    "employment cost index": "High",
+    "job openings and labor turnover": "High",
+    "productivity and costs": "High",
+    "import and export price": "High",
 }
 
 
@@ -202,22 +226,298 @@ def event_meaning(event: EconomicEvent) -> str:
     return f"{event.country_ko} 경기·물가·금리 흐름을 판단하는 자료"
 
 
+def _unfold_ical(raw: str) -> list[str]:
+    unfolded: list[str] = []
+    for line in raw.replace("\r\n", "\n").split("\n"):
+        if line.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(line)
+    return unfolded
+
+
+def _official_bls_events(
+    settings: Settings,
+    store: StateStore | None,
+) -> list[dict[str, Any]]:
+    cache_key = "calendar:official_bls"
+    try:
+        response = request(
+            "GET",
+            BLS_CALENDAR_URL,
+            settings,
+            provider="bls_calendar",
+            attempts=3,
+            headers={
+                "User-Agent": (
+                    "JIN-Market-Pulse/2.2 "
+                    f"(personal bot; {settings.data_contact_email})"
+                ),
+                "Accept": "text/calendar",
+            },
+            session=SimpleNamespace(get=requests.get),
+        )
+        text = response.text
+        if "BEGIN:VCALENDAR" not in text:
+            raise ProviderRequestError("bls_calendar", "invalid calendar response")
+        lines = _unfold_ical(text)
+        raw_events: list[dict[str, Any]] = []
+        event: dict[str, str] | None = None
+        for line in lines:
+            if line == "BEGIN:VEVENT":
+                event = {}
+                continue
+            if line == "END:VEVENT":
+                if event:
+                    summary = event.get("SUMMARY", "")
+                    normalized = summary.lower()
+                    impact = next(
+                        (
+                            value
+                            for term, value in OFFICIAL_RELEASE_TERMS.items()
+                            if term in normalized
+                        ),
+                        "",
+                    )
+                    if impact and event.get("DTSTART"):
+                        when = datetime.strptime(
+                            event["DTSTART"],
+                            "%Y%m%dT%H%M%S",
+                        ).replace(tzinfo=NEW_YORK)
+                        raw_events.append(
+                            {
+                                "title": summary.replace("\\,", ","),
+                                "country": "USD",
+                                "date": when.isoformat(),
+                                "impact": impact,
+                                "forecast": "",
+                                "previous": "",
+                                "actual": "",
+                                "source": "U.S. Bureau of Labor Statistics",
+                            }
+                        )
+                event = None
+                continue
+            if event is None or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            key = name.split(";", 1)[0]
+            if key in {"SUMMARY", "DTSTART"}:
+                event[key] = value
+        if store:
+            store.cache_set(
+                cache_key,
+                raw_events,
+                source="U.S. Bureau of Labor Statistics",
+                ttl_seconds=12 * 60 * 60,
+            )
+            store.record_provider_result("bls_calendar", success=True)
+        return raw_events
+    except Exception as exc:
+        cached = (
+            store.cache_get(cache_key, max_stale_seconds=30 * 24 * 3600)
+            if store
+            else None
+        )
+        if store:
+            store.record_provider_result(
+                "bls_calendar",
+                success=False,
+                error=type(exc).__name__,
+            )
+        if cached and isinstance(cached["payload"], list):
+            return cached["payload"]
+        logging.warning("BLS release calendar unavailable.")
+        return []
+
+
+def _official_bea_events(
+    settings: Settings,
+    store: StateStore | None,
+) -> list[dict[str, Any]]:
+    cache_key = "calendar:official_bea"
+    try:
+        response = request(
+            "GET",
+            BEA_SCHEDULE_URL,
+            settings,
+            provider="bea_calendar",
+            attempts=3,
+            headers={"User-Agent": "JIN-Market-Pulse/2.2"},
+            session=SimpleNamespace(get=requests.get),
+        )
+        body = response.text
+        pattern = re.compile(
+            r'<div class="release-date">\s*([^<]+?)\s*</div>\s*'
+            r'<small[^>]*>\s*([^<]+?)\s*</small>.*?'
+            r'<td class="release-title[^"]*"[^>]*>\s*([^<]+?)\s*</td>',
+            re.DOTALL | re.IGNORECASE,
+        )
+        raw_events: list[dict[str, Any]] = []
+        year = datetime.now(KST).year
+        for date_text, time_text, title in pattern.findall(body):
+            normalized = re.sub(r"\s+", " ", title).strip()
+            if not any(
+                term in normalized.lower()
+                for term in (
+                    "gdp",
+                    "personal income and outlays",
+                    "international trade in goods and services",
+                )
+            ):
+                continue
+            when = datetime.strptime(
+                f"{date_text.strip()} {year} {time_text.strip()}",
+                "%B %d %Y %I:%M %p",
+            ).replace(tzinfo=NEW_YORK)
+            title_for_ranking = (
+                f"PCE Price Index · {normalized}"
+                if "personal income and outlays" in normalized.lower()
+                else normalized
+            )
+            raw_events.append(
+                {
+                    "title": title_for_ranking,
+                    "country": "USD",
+                    "date": when.isoformat(),
+                    "impact": "High",
+                    "forecast": "",
+                    "previous": "",
+                    "actual": "",
+                    "source": "U.S. Bureau of Economic Analysis",
+                }
+            )
+        if not raw_events:
+            raise ProviderRequestError("bea_calendar", "no releases parsed")
+        if store:
+            store.cache_set(
+                cache_key,
+                raw_events,
+                source="U.S. Bureau of Economic Analysis",
+                ttl_seconds=12 * 60 * 60,
+            )
+            store.record_provider_result("bea_calendar", success=True)
+        return raw_events
+    except Exception as exc:
+        cached = (
+            store.cache_get(cache_key, max_stale_seconds=30 * 24 * 3600)
+            if store
+            else None
+        )
+        if store:
+            store.record_provider_result(
+                "bea_calendar",
+                success=False,
+                error=type(exc).__name__,
+            )
+        if cached and isinstance(cached["payload"], list):
+            return cached["payload"]
+        logging.warning("BEA release calendar unavailable.")
+        return []
+
+
 def fetch_economic_events(
     settings: Settings,
     *,
     lookback_hours: int = 0,
     days_ahead: int = 4,
+    store: StateStore | None = None,
 ) -> list[EconomicEvent]:
-    response = requests.get(CALENDAR_URL, timeout=settings.request_timeout_seconds)
-    response.raise_for_status()
     now = datetime.now(KST)
     start = now - timedelta(hours=lookback_hours)
     end = now + timedelta(days=days_ahead)
+    urls = [("thisweek", CALENDAR_URL)]
+    start_of_next_week = (now + timedelta(days=7 - now.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    raw_events: list[dict[str, Any]] = []
+    for key, url in urls:
+        cache_key = f"calendar:{key}"
+        try:
+            response = request(
+                "GET",
+                url,
+                settings,
+                provider="economic_calendar",
+                attempts=3,
+                session=SimpleNamespace(get=requests.get),
+            )
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ProviderRequestError(
+                    "economic_calendar",
+                    "invalid JSON shape",
+                )
+            raw_events.extend(item for item in payload if isinstance(item, dict))
+            if store:
+                store.cache_set(
+                    cache_key,
+                    payload,
+                    source="Forex Factory calendar",
+                    ttl_seconds=15 * 60,
+                )
+                store.record_provider_result("economic_calendar", success=True)
+        except Exception as exc:
+            cached = (
+                store.cache_get(cache_key, max_stale_seconds=7 * 24 * 3600)
+                if store
+                else None
+            )
+            if cached and isinstance(cached["payload"], list):
+                raw_events.extend(
+                    item
+                    for item in cached["payload"]
+                    if isinstance(item, dict)
+                )
+                logging.warning(
+                    "Economic calendar live fetch failed; using cached %s data.",
+                    key,
+                )
+            else:
+                logging.warning(
+                    "Economic calendar unavailable for %s.",
+                    key,
+                    exc_info=True,
+                )
+            if store:
+                store.record_provider_result(
+                    "economic_calendar",
+                    success=False,
+                    error=type(exc).__name__,
+                )
+
+    if end >= start_of_next_week or not raw_events:
+        official = [
+            *_official_bls_events(settings, store),
+            *_official_bea_events(settings, store),
+        ]
+        if raw_events:
+            current_feed_end = max(
+                (
+                    datetime.fromisoformat(str(item.get("date", ""))).astimezone(KST)
+                    for item in raw_events
+                    if item.get("date")
+                ),
+                default=now,
+            )
+            official = [
+                item
+                for item in official
+                if datetime.fromisoformat(str(item["date"])).astimezone(KST)
+                > current_feed_end
+            ]
+        raw_events.extend(official)
+
     result: list[EconomicEvent] = []
-    for raw in response.json():
+    seen: set[str] = set()
+    for raw in raw_events:
         try:
             event_time = datetime.fromisoformat(str(raw.get("date", ""))).astimezone(KST)
-        except ValueError:
+        except (TypeError, ValueError):
             continue
         if event_time < start or event_time > end:
             continue
@@ -233,12 +533,14 @@ def fetch_economic_events(
             term in title.lower()
             for term in ("speaks", "minutes", "statement", "rate decision", "press conference")
         )
-        if not (forecast or previous or actual or qualitative):
+        event_id = _event_id(title, country, event_time)
+        if event_id in seen:
             continue
+        seen.add(event_id)
         stronger, weaker = _sensitivity(title, country)
         result.append(
             EconomicEvent(
-                event_id=_event_id(title, country, event_time),
+                event_id=event_id,
                 title=title,
                 title_ko=_title_ko(title),
                 country=country,
@@ -250,6 +552,7 @@ def fetch_economic_events(
                 actual=actual,
                 sensitivity_stronger=stronger,
                 sensitivity_weaker=weaker,
+                source=str(raw.get("source") or "Forex Factory calendar"),
             )
         )
     return sorted(result, key=lambda event: event.event_time_kst)

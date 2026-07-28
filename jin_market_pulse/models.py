@@ -23,6 +23,9 @@ class AssetQuote(BaseModel):
     comparison_label: str = "전일"
     stale: bool = False
     unit: str = ""
+    proxy: bool = False
+    verified: bool = True
+    quality_flags: list[str] = Field(default_factory=list)
 
 
 class EconomicEvent(BaseModel):
@@ -62,6 +65,8 @@ class NewsItem(BaseModel):
     summary: str = ""
     official_source: bool = False
     trusted_source: bool = False
+    source_tier: int = 3
+    relevant_asset_keys: list[str] = Field(default_factory=list)
 
 
 class SignalSelection(BaseModel):
@@ -85,6 +90,14 @@ class EmergencyAnalysis(BaseModel):
     summary_ko: str = Field(min_length=5, max_length=240)
     meaning: str = Field(min_length=5, max_length=240)
     source_news_ids: list[str] = Field(default_factory=list, max_length=3)
+
+
+class CurrentMoveAnalysis(BaseModel):
+    observed: list[str] = Field(default_factory=list, max_length=4)
+    confirmed_causes: list[str] = Field(default_factory=list, max_length=2)
+    possible_background: list[str] = Field(default_factory=list, max_length=3)
+    counter_evidence: list[str] = Field(default_factory=list, max_length=2)
+    source_news_ids: list[str] = Field(default_factory=list, max_length=4)
 
 
 class MarketData(BaseModel):

@@ -3,15 +3,37 @@ from __future__ import annotations
 import hmac
 import logging
 from threading import Lock
+from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 
 from .app import MarketPulseApp, setup_logging
-from .bot_queries import answer_market_query
+from .bot_queries import (
+    _candidate_response,
+    answer_market_query,
+    route_query,
+)
 from .config import Settings
+from .jobs import process_telegram_update, run_tick
+from .links import first_https_url
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import MAIN_KEYBOARD, TelegramClient
+
+
+def _authorized(value: str | None, secret: str) -> bool:
+    expected = f"Bearer {secret}"
+    return (
+        len(secret) >= 16
+        and value is not None
+        and hmac.compare_digest(value, expected)
+    )
+
+
+def _webhook_chat_id(payload: dict[str, Any]) -> str:
+    callback = payload.get("callback_query") or {}
+    message = payload.get("message") or callback.get("message") or {}
+    return str((message.get("chat") or {}).get("id") or "")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -22,26 +44,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
     )
     morning_lock = Lock()
-    telegram_lock = Lock()
+    tick_lock = Lock()
 
     def current_settings() -> Settings:
         return settings or Settings.from_env(require_secrets=True)
+
+    def state_for(job_settings: Settings) -> StateStore:
+        return StateStore(
+            job_settings.state_db,
+            legacy_json=job_settings.state_file,
+        )
+
+    def drain_telegram_queue(job_settings: Settings) -> None:
+        store = state_for(job_settings)
+        telegram = TelegramClient(job_settings)
+        for item in store.pending_telegram_updates(limit=10):
+            update_id = int(item["update_id"])
+            payload = item["payload"]
+            store.mark_telegram_update(update_id, "processing")
+            try:
+                message = payload.get("message") or {}
+                text = str(message.get("text") or "").strip()
+                simple_text = bool(
+                    text
+                    and not payload.get("callback_query")
+                    and not message.get("photo")
+                    and not message.get("voice")
+                    and not message.get("forward_origin")
+                    and not first_https_url(text)
+                )
+                if simple_text:
+                    route = route_query(
+                        text,
+                        store.get_chat_context(job_settings.telegram_chat_id),
+                    )
+                    answer = answer_market_query(
+                        text,
+                        job_settings,
+                        store,
+                    )
+                    if route.candidates:
+                        candidate = _candidate_response(route.candidates)
+                        telegram.send(
+                            answer,
+                            parse_mode="HTML",
+                            reply_markup=candidate.reply_markup,
+                        )
+                    elif route.intent in {"start", "help"}:
+                        telegram.send(
+                            answer,
+                            parse_mode="HTML",
+                            reply_markup=MAIN_KEYBOARD,
+                        )
+                    else:
+                        telegram.send(answer, parse_mode="HTML")
+                else:
+                    process_telegram_update(
+                        payload,
+                        job_settings,
+                        store,
+                        telegram,
+                    )
+                store.mark_telegram_update(update_id, "done")
+            except Exception as exc:
+                store.mark_telegram_update(
+                    update_id,
+                    "retry",
+                    error=type(exc).__name__,
+                )
+                logging.exception("Telegram webhook background task failed.")
 
     @api.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "jin-market-pulse", "mode": "serverless"}
 
+    @api.get("/ready")
+    def ready() -> dict[str, Any]:
+        job_settings = current_settings()
+        readiness = state_for(job_settings).readiness()
+        return {
+            "status": "ready",
+            "database": readiness["database"],
+            "schema_version": readiness["schema_version"],
+        }
+
     @api.post("/jobs/morning")
     async def morning_job(
         authorization: str | None = Header(default=None),
+        x_idempotency_key: str | None = Header(default=None),
     ) -> dict[str, str]:
         job_settings = current_settings()
-        expected = f"Bearer {job_settings.cron_secret}"
-        if (
-            len(job_settings.cron_secret) < 16
-            or authorization is None
-            or not hmac.compare_digest(authorization, expected)
-        ):
+        if not _authorized(authorization, job_settings.cron_secret):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Unauthorized",
@@ -52,9 +145,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Morning report is already running",
             )
         try:
-            result = await run_in_threadpool(
-                MarketPulseApp(job_settings).send_morning_report
-            )
+            app = MarketPulseApp(job_settings)
+            if x_idempotency_key:
+                result = await run_in_threadpool(
+                    lambda: app.send_morning_report(
+                        idempotency_key=x_idempotency_key[:100]
+                    )
+                )
+            else:
+                result = await run_in_threadpool(app.send_morning_report)
             return {"status": result}
         except Exception:
             logging.exception("Serverless morning job failed.")
@@ -65,9 +164,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             morning_lock.release()
 
+    @api.post("/jobs/tick")
+    async def tick_job(
+        authorization: str | None = Header(default=None),
+        x_idempotency_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        job_settings = current_settings()
+        if not _authorized(authorization, job_settings.cron_secret):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+        if not tick_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Tick is already running",
+            )
+        try:
+            return await run_in_threadpool(
+                lambda: run_tick(
+                    job_settings,
+                    idempotency_key=(
+                        x_idempotency_key[:100]
+                        if x_idempotency_key
+                        else None
+                    ),
+                )
+            )
+        except Exception:
+            logging.exception("Serverless tick failed.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Tick failed",
+            ) from None
+        finally:
+            tick_lock.release()
+
     @api.post("/telegram/webhook")
     async def telegram_webhook(
         request: Request,
+        background_tasks: BackgroundTasks,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> dict[str, str]:
         job_settings = current_settings()
@@ -86,46 +222,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         payload = await request.json()
         update_id = payload.get("update_id")
-        message = payload.get("message") or {}
-        chat = message.get("chat") or {}
-        text = str(message.get("text") or "").strip()
-        if not isinstance(update_id, int) or not text:
+        if not isinstance(update_id, int):
             return {"status": "ignored"}
-        if str(chat.get("id")) != str(job_settings.telegram_chat_id):
+        if _webhook_chat_id(payload) != str(job_settings.telegram_chat_id):
             return {"status": "ignored"}
 
-        store = StateStore(job_settings.state_file)
-        if not store.claim_telegram_update(update_id):
+        store = state_for(job_settings)
+        if not store.claim_telegram_update(update_id, payload):
             return {"status": "duplicate"}
-        if not telegram_lock.acquire(blocking=False):
-            store.forget_telegram_update(update_id)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Another Telegram query is running",
-            )
-        try:
-            answer = await run_in_threadpool(
-                answer_market_query,
-                text,
-                job_settings,
-                store,
-            )
-            await run_in_threadpool(
-                lambda: TelegramClient(job_settings).send(
-                    answer,
-                    parse_mode="HTML",
-                )
-            )
-            return {"status": "sent"}
-        except Exception:
-            store.forget_telegram_update(update_id)
-            logging.exception("Telegram query failed.")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Telegram query failed",
-            ) from None
-        finally:
-            telegram_lock.release()
+        background_tasks.add_task(drain_telegram_queue, job_settings)
+        return {"status": "sent"}
 
     return api
 

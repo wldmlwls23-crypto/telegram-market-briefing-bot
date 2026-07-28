@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 
+from .calendar import event_meaning
 from .config import KST, Settings
 from .models import (
     AssetQuote,
@@ -100,6 +101,8 @@ def _quote_payload(quote: AssetQuote) -> dict[str, object]:
         ),
         "source": quote.source,
         "as_of_kst": quote.as_of.astimezone(KST).strftime("%Y-%m-%d %H:%M"),
+        "verified": quote.verified,
+        "stale": quote.stale,
     }
 
 
@@ -239,6 +242,10 @@ def _validated_analysis(
         ][:3]
         if not related:
             continue
+        if news.relevant_asset_keys and not (
+            set(related) & set(news.relevant_asset_keys)
+        ):
+            continue
         signal.title_ko = _short(_clean_ai_text(signal.title_ko), 55)
         signal.meaning = _short(_clean_ai_text(signal.meaning), 105)
         signal.related_asset_keys = related
@@ -302,11 +309,20 @@ def _format_quote_html(quote: AssetQuote) -> str:
 
 
 def select_report_assets(quotes: dict[str, AssetQuote]) -> list[AssetQuote]:
-    selected = [quotes[key] for key in CORE_ASSET_KEYS if key in quotes]
+    selected = [
+        quotes[key]
+        for key in CORE_ASSET_KEYS
+        if key in quotes and not quotes[key].stale and quotes[key].verified
+    ]
     extras: list[tuple[float, AssetQuote]] = []
     for key, threshold in EXTRA_THRESHOLDS.items():
         quote = quotes.get(key)
-        if quote and quote.percent_change is not None:
+        if (
+            quote
+            and quote.percent_change is not None
+            and not quote.stale
+            and quote.verified
+        ):
             ratio = abs(quote.percent_change) / threshold
             if ratio >= 1:
                 extras.append((ratio, quote))
@@ -334,7 +350,7 @@ def select_future_events(data: MarketData) -> list[EconomicEvent]:
 
 
 def _axis_text(quote: AssetQuote | None, label: str) -> str:
-    if not quote:
+    if not quote or quote.stale or not quote.verified:
         return ""
     arrow, movement = _movement(quote)
     return f"{label}{arrow}{movement}"
@@ -419,7 +435,7 @@ def _render_report(
         data.generated_at_kst.strftime("%m/%d %H:%M KST"),
         "",
         "<b>한눈에</b>",
-        html.escape(relationship),
+        html.escape(summary),
         "",
         REQUIRED_HEADINGS[0],
     ]
@@ -428,7 +444,7 @@ def _render_report(
     lines.extend(["", REQUIRED_HEADINGS[1]])
     signals = analysis.signals[:signal_limit]
     if not signals:
-        lines.append("- 가격 흐름을 넘어설 신규 핵심 뉴스는 제한적")
+        lines.append("- 가격 움직임과 연결해 검증된 신규 핵심 뉴스 없음")
     for index, signal in enumerate(signals, start=1):
         news = news_map.get(signal.candidate_id)
         if not news:
@@ -463,12 +479,13 @@ def _render_report(
         values = _event_values(event)
         if values:
             lines.append(f"  {html.escape(_short(values, 55))}")
+        lines.append(f"  의미: {html.escape(_short(event_meaning(event), 58))}")
 
     lines.extend(
         [
             "",
             REQUIRED_HEADINGS[3],
-            html.escape(summary),
+            html.escape(relationship),
             "",
             REQUIRED_HEADINGS[4],
         ]

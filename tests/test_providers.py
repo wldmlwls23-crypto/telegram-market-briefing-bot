@@ -10,15 +10,19 @@ from jin_market_pulse.providers import (
     fetch_asset_quote,
     fetch_btc_intraday_series,
     fetch_market_quotes,
+    fetch_fred_treasury_quotes,
     fetch_treasury_quotes,
     fetch_yahoo_quote,
+    _verify_outlier_directions,
 )
+from jin_market_pulse.state import StateStore
 
 
 class FakeResponse:
-    def __init__(self, payload=None, content: bytes = b""):
+    def __init__(self, payload=None, content: bytes = b"", text: str = ""):
         self._payload = payload
         self.content = content
+        self.text = text
 
     def raise_for_status(self):
         return None
@@ -202,3 +206,81 @@ def test_single_crypto_lookup_uses_fast_yahoo_path(
     assert quote.key == "eth"
     assert quote.comparison_label == "직전 UTC 종가"
     assert calls == [("eth", "ETH-USD")]
+
+
+def test_single_quote_falls_back_to_sqlite_cache(
+    monkeypatch,
+    settings,
+    market_data,
+):
+    store = StateStore(settings.state_db)
+    cached = market_data.quotes["btc"].model_copy(
+        update={"source": "cached fixture"}
+    )
+    store.cache_set(
+        "quote:btc",
+        cached.model_dump(mode="json"),
+        source=cached.source,
+        ttl_seconds=60,
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_yahoo_quote",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("timeout")),
+    )
+
+    quote = fetch_asset_quote("btc", settings, store)
+
+    assert "마지막 정상값" in quote.source
+    assert "cached" in quote.quality_flags
+
+
+def test_wti_outlier_is_rejected_when_proxy_moves_opposite(
+    monkeypatch,
+    settings,
+    market_data,
+):
+    quote = market_data.quotes["wti"].model_copy(
+        update={"percent_change": -8.0, "absolute_change": -8.0}
+    )
+    verifier = market_data.quotes["wti"].model_copy(
+        update={
+            "key": "wti_proxy",
+            "name_ko": "WTI 대용 ETF",
+            "percent_change": 2.0,
+            "absolute_change": 2.0,
+        }
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.providers.fetch_yahoo_quote",
+        lambda *_args: verifier,
+    )
+    errors = []
+
+    _verify_outlier_directions({"wti": quote}, settings, errors)
+
+    assert quote.verified is False
+    assert any("방향 불일치" in flag for flag in quote.quality_flags)
+    assert errors == ["wti: outlier direction mismatch"]
+
+
+def test_fred_parses_latest_two_complete_rows(monkeypatch, settings):
+    today = datetime.now(timezone.utc).date()
+    previous = today - timedelta(days=1)
+    csv_text = (
+        "DATE,DGS2,DGS10\n"
+        f"{previous.isoformat()},4.10,4.20\n"
+        f"{today.isoformat()},4.15,4.30\n"
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.providers._session",
+        lambda: type(
+            "Session",
+            (),
+            {"get": lambda *args, **kwargs: FakeResponse(text=csv_text)},
+        )(),
+    )
+
+    quotes = fetch_fred_treasury_quotes(settings)
+
+    assert quotes["us2y"].absolute_change == pytest.approx(0.05)
+    assert quotes["us10y"].absolute_change == pytest.approx(0.10)

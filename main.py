@@ -2,7 +2,7 @@ import os
 
 
 def main() -> None:
-    run_mode = os.getenv("RUN_MODE", "worker").strip().lower()
+    run_mode = os.getenv("RUN_MODE", "serverless").strip().lower()
     if run_mode == "serverless":
         import uvicorn
 
