@@ -22,6 +22,7 @@
 - `jin_market_pulse/reports.py`: OpenAI 구조화 분석과 텔레그램 리포트 렌더링
 - `jin_market_pulse/chart.py`: BTC 24시간 PNG 차트
 - `jin_market_pulse/bot_queries.py`: Telegram 숫자 조회
+- `jin_market_pulse/advisor.py`: 내장 시장 용어와 제한형 AI 설명
 - `jin_market_pulse/alerts.py`: 사전 알림, 결과 업데이트, 긴급 알림
 - `jin_market_pulse/state.py`: Railway Volume 상태 저장
 - `tests`: 자동 테스트

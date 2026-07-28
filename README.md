@@ -28,6 +28,10 @@ The Telegram webhook also wakes the same serverless service only when the
 authorized chat asks for a numeric market lookup. These lookups do not call
 OpenAI.
 
+Common market definitions are answered from built-in Korean explanations.
+More complex educational relationship questions may use OpenAI up to the
+configured daily limit.
+
 한국어 Telegram 시장 브리핑 봇입니다. Railway의 백그라운드 worker로 실행됩니다.
 
 v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 정확성과 가독성입니다.
@@ -81,6 +85,8 @@ v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 �
 TELEGRAM_BOT_TOKEN=실제 값
 TELEGRAM_CHAT_ID=실제 값
 TELEGRAM_WEBHOOK_SECRET=별도의 긴 무작위 값
+ENABLE_AI_ADVISOR=true
+AI_ADVISOR_DAILY_LIMIT=5
 OPENAI_API_KEY=실제 값
 OPENAI_MODEL=gpt-5.6
 OPENAI_REASONING_EFFORT=medium
@@ -100,21 +106,27 @@ FMP_API_KEY=
 
 비밀값은 Railway Variables에서만 관리합니다.
 
-## Telegram 숫자 조회
+## Telegram 시장 상담
 
 허용된 `TELEGRAM_CHAT_ID`에서만 다음 조회를 사용할 수 있습니다.
 
 ```text
 비트 얼마야
 ETH 변동
+DXY가 뭐야?
+금리가 Nasdaq에 왜 중요해?
 /price gold
 /markets
 /calendar
 ```
 
 지원 자산은 BTC, ETH, S&P 500, Nasdaq 100, Dow, DXY, 미국채 2년·10년,
-KOSPI, KOSDAQ, 원달러, WTI, 금입니다. 가격·변동·일정 조회는 OpenAI를
-호출하지 않으며 매매 판단과 가격 전망에는 답하지 않습니다.
+KOSPI, KOSDAQ, 원달러, WTI, 금입니다.
+
+- 가격·변동·일정: 검증된 공급원만 사용하며 OpenAI를 호출하지 않습니다.
+- 기본 용어: 내장된 한국어 설명으로 즉시 답합니다.
+- 자산 관계와 시장 원리: OpenAI를 하루 최대 5회 사용합니다.
+- 현재 움직임의 원인, 매매 판단, 가격 전망: 추측하거나 답하지 않습니다.
 
 ## Railway Volume 연결
 

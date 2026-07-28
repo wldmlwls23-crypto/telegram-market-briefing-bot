@@ -54,7 +54,7 @@ def test_telegram_webhook_checks_secret_chat_and_duplicate(
     answers = []
     monkeypatch.setattr(
         "jin_market_pulse.server.answer_market_query",
-        lambda text, _settings: f"<b>{text}</b>",
+        lambda text, _settings, _store: f"<b>{text}</b>",
     )
     monkeypatch.setattr(
         "jin_market_pulse.server.TelegramClient.send",

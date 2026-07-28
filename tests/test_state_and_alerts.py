@@ -41,3 +41,16 @@ def test_telegram_update_claim_is_persistent_and_reversible(tmp_path):
     first.forget_telegram_update(101)
 
     assert StateStore(path).claim_telegram_update(101)
+
+
+def test_ai_advisor_daily_limit_persists_and_failed_slot_can_be_released(tmp_path):
+    path = tmp_path / "state.json"
+    state = StateStore(path)
+
+    assert state.claim_ai_advisor_slot(2)
+    assert StateStore(path).claim_ai_advisor_slot(2)
+    assert not state.claim_ai_advisor_slot(2)
+
+    state.release_ai_advisor_slot()
+
+    assert StateStore(path).claim_ai_advisor_slot(2)

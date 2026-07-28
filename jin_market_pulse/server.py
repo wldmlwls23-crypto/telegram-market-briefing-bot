@@ -108,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 answer_market_query,
                 text,
                 job_settings,
+                store,
             )
             await run_in_threadpool(
                 lambda: TelegramClient(job_settings).send(

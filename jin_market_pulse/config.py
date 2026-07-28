@@ -42,6 +42,8 @@ class Settings:
     run_mode: str = "worker"
     cron_secret: str = ""
     telegram_webhook_secret: str = ""
+    enable_ai_advisor: bool = True
+    ai_advisor_daily_limit: int = 5
     port: int = 8000
     openai_max_output_tokens: int = 2500
 
@@ -78,6 +80,10 @@ class Settings:
             telegram_webhook_secret=os.getenv(
                 "TELEGRAM_WEBHOOK_SECRET", ""
             ).strip(),
+            enable_ai_advisor=env_bool("ENABLE_AI_ADVISOR", True),
+            ai_advisor_daily_limit=int(
+                os.getenv("AI_ADVISOR_DAILY_LIMIT", "5")
+            ),
             port=int(os.getenv("PORT", "8000")),
             openai_max_output_tokens=int(
                 os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2500")

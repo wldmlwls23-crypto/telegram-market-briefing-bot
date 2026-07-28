@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 
+from .advisor import (
+    create_advisor_answer,
+    matched_topics,
+    render_topic_explanation,
+)
 from .calendar import fetch_economic_events
 from .config import KST, Settings
 from .models import AssetQuote, EconomicEvent, MarketData
 from .providers import fetch_asset_quote, fetch_market_quotes
 from .reports import format_quote, select_future_events
+from .state import StateStore
 
 
 ASSET_ALIASES = {
@@ -40,8 +47,22 @@ SUPPORTED_ORDER = (
     "wti",
     "gold",
 )
-NON_NUMERIC_TERMS = {
-    "왜",
+PRICE_TERMS = {
+    "가격",
+    "얼마",
+    "시세",
+    "변동",
+    "현재가",
+}
+EXPLAIN_TERMS = {
+    "뭐야",
+    "무엇",
+    "뜻",
+    "설명",
+    "알려줘",
+    "왜 중요",
+}
+ADVICE_TERMS = {
     "전망",
     "예측",
     "오를까",
@@ -50,6 +71,26 @@ NON_NUMERIC_TERMS = {
     "매도",
     "살까",
     "팔까",
+    "사도",
+    "팔아도",
+    "들어가도",
+}
+RELATION_TERMS = {"관계", "영향", "연결", "왜", "오르면", "내리면"}
+CURRENT_TERMS = {"지금", "오늘", "현재", "방금"}
+MARKET_TERMS = {
+    "시장",
+    "주식",
+    "코인",
+    "달러",
+    "채권",
+    "금리",
+    "물가",
+    "인플레",
+    "경기",
+    "유동성",
+    "연준",
+    "fed",
+    "환율",
 }
 
 
@@ -92,19 +133,63 @@ def _calendar_html(events: list[EconomicEvent]) -> str:
 def _help() -> str:
     return "\n".join(
         [
-            "<b>숫자 조회 사용법</b>",
+            "<b>JIN 시장 상담 사용법</b>",
             "- 비트 얼마야",
+            "- DXY가 뭐야?",
+            "- 금리가 Nasdaq에 왜 중요해?",
             "- ETH 변동",
             "- /price gold",
             "- /markets",
             "- /calendar",
             "",
-            "가격·변동·일정만 조회할 수 있습니다.",
+            "가격·일정·시장 개념을 물어볼 수 있습니다.",
         ]
     )
 
 
-def answer_market_query(text: str, settings: Settings) -> str:
+def _live_quote(key: str, settings: Settings) -> str:
+    try:
+        quote = fetch_asset_quote(key, settings)
+        return "\n".join(
+            [
+                f"<b>{html.escape(quote.name_ko)}</b>",
+                _quote_html(quote),
+                f"<i>기준 {quote.as_of.astimezone(KST):%m/%d %H:%M} KST · "
+                f"{html.escape(quote.source)}</i>",
+            ]
+        )
+    except Exception:
+        logging.warning("Single asset query failed for %s.", key, exc_info=True)
+        return "<b>해당 자산의 최신 유효값이 없습니다.</b>"
+
+
+def _advisor_or_limit(
+    text: str,
+    settings: Settings,
+    store: StateStore | None,
+) -> str:
+    if not settings.enable_ai_advisor or store is None:
+        return "<b>AI 시장 설명이 현재 비활성화되어 있습니다.</b>"
+    if not store.claim_ai_advisor_slot(settings.ai_advisor_daily_limit):
+        return "\n".join(
+            [
+                "<b>오늘의 AI 설명 횟수를 모두 사용했습니다.</b>",
+                "가격·일정·기본 용어 설명은 계속 이용할 수 있습니다.",
+            ]
+        )
+    try:
+        return create_advisor_answer(text, settings)
+    except Exception:
+        store.release_ai_advisor_slot()
+        logging.exception("AI advisor request failed.")
+        return "<b>AI 설명을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.</b>"
+
+
+def answer_market_query(
+    text: str,
+    settings: Settings,
+    store: StateStore | None = None,
+) -> str:
     normalized = _normalized(text)
     if normalized.startswith("/calendar") or "경제일정" in normalized or normalized == "일정":
         from datetime import datetime
@@ -129,23 +214,54 @@ def answer_market_query(text: str, settings: Settings) -> str:
         lines.append(f"\n<i>조회 {__import__('datetime').datetime.now(KST):%m/%d %H:%M} KST</i>")
         return "\n".join(lines)
 
-    if any(term in normalized for term in NON_NUMERIC_TERMS):
-        return _help()
-
     key = _asset_key(normalized)
+    topics = matched_topics(normalized)
+    wants_price = normalized.startswith("/price") or any(
+        term in normalized for term in PRICE_TERMS
+    )
+    wants_explanation = any(term in normalized for term in EXPLAIN_TERMS)
+    asks_relation = any(term in normalized for term in RELATION_TERMS)
+
+    if key and wants_price:
+        return _live_quote(key, settings)
+
+    if any(term in normalized for term in ADVICE_TERMS):
+        return "\n".join(
+            [
+                "<b>매수·매도 결정과 가격 예측은 제공하지 않습니다.</b>",
+                "대신 현재 가격, 지표 뜻, 자산 간 일반적인 관계를 설명할 수 있습니다.",
+            ]
+        )
+
+    if "왜" in normalized and any(
+        term in normalized for term in CURRENT_TERMS
+    ):
+        return "\n".join(
+            [
+                "<b>현재 움직임의 원인은 단정하지 않습니다.</b>",
+                "실시간 뉴스와 여러 자산의 반응을 함께 검증해야 하기 때문입니다.",
+                "현재 숫자는 /markets에서 확인할 수 있습니다.",
+            ]
+        )
+
+    if len(topics) == 1 and wants_explanation and not asks_relation:
+        return render_topic_explanation(topics[0])
+
+    if asks_relation and (
+        topics or any(term in normalized for term in MARKET_TERMS)
+    ):
+        return _advisor_or_limit(text, settings, store)
+
+    if len(topics) == 1 and wants_explanation:
+        return render_topic_explanation(topics[0])
+
     if key:
-        try:
-            quote = fetch_asset_quote(key, settings)
-            return "\n".join(
-                [
-                    f"<b>{html.escape(quote.name_ko)}</b>",
-                    _quote_html(quote),
-                    f"<i>기준 {quote.as_of.astimezone(KST):%m/%d %H:%M} KST · "
-                    f"{html.escape(quote.source)}</i>",
-                ]
-            )
-        except (KeyError, RuntimeError, ValueError):
-            pass
-        return "<b>해당 자산의 최신 유효값이 없습니다.</b>"
+        return _live_quote(key, settings)
+
+    if topics:
+        return render_topic_explanation(topics[0])
+
+    if any(term in normalized for term in MARKET_TERMS):
+        return _advisor_or_limit(text, settings, store)
 
     return _help()

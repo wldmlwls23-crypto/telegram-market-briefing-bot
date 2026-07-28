@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from .config import KST
 from .models import AssetQuote
 
 
@@ -26,6 +27,7 @@ class StateStore:
             "events": {},
             "market_snapshots": [],
             "telegram_update_ids": [],
+            "ai_advisor_usage": {"date": "", "count": 0},
         }
 
     def load(self) -> dict[str, Any]:
@@ -165,6 +167,32 @@ class StateStore:
                 if value != update_id
             ]
             self.save(data)
+
+    def claim_ai_advisor_slot(self, daily_limit: int) -> bool:
+        with self._lock:
+            data = self.load()
+            today = datetime.now(KST).date().isoformat()
+            usage = data.setdefault(
+                "ai_advisor_usage",
+                {"date": today, "count": 0},
+            )
+            if usage.get("date") != today:
+                usage = {"date": today, "count": 0}
+                data["ai_advisor_usage"] = usage
+            if int(usage.get("count", 0)) >= max(daily_limit, 0):
+                return False
+            usage["count"] = int(usage.get("count", 0)) + 1
+            self.save(data)
+            return True
+
+    def release_ai_advisor_slot(self) -> None:
+        with self._lock:
+            data = self.load()
+            today = datetime.now(KST).date().isoformat()
+            usage = data.get("ai_advisor_usage", {})
+            if usage.get("date") == today:
+                usage["count"] = max(int(usage.get("count", 0)) - 1, 0)
+                self.save(data)
 
     def _prune(self, data: dict[str, Any]) -> None:
         cutoff = datetime.now(UTC) - timedelta(days=21)
