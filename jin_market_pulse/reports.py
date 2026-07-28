@@ -57,7 +57,7 @@ REQUIRED_HEADINGS = (
     "<b>1. 핵심 신호</b>",
     "<b>2. 오늘 일정</b>",
     "<b>3. 시장 연결</b>",
-    "<b>4. 지표 시나리오</b>",
+    "<b>4. 핵심 지표 시나리오</b>",
     "<b>5. 오늘 관찰 순서</b>",
 )
 
@@ -507,7 +507,13 @@ def _render_report(
     if events:
         focus = max(events, key=lambda event: (len(event.importance), -event.event_time_kst.timestamp()))
         priorities.append(f"{focus.event_time_kst:%H:%M} {focus.title_ko} 결과")
-    priorities.extend(["DXY → 미국채 10년물", "Nasdaq → BTC"])
+    priorities.extend(
+        [
+            "DXY → 미국채 10년물",
+            "Nasdaq → BTC",
+            "WTI → DXY·미국채 금리",
+        ]
+    )
     for index, value in enumerate(priorities[:3], start=1):
         lines.append(f"{index}. {html.escape(_short(value, 48))}")
     return "\n".join(lines).strip()

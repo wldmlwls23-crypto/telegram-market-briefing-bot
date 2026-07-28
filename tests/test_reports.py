@@ -43,6 +43,8 @@ def test_morning_report_is_compact_html_with_six_korean_sections(market_data):
     assert text.startswith("<b>JIN Market Pulse</b>")
     assert "<b>0. 현재 시장</b>" in text
     assert "<b>5. 오늘 관찰 순서</b>" in text
+    assert "<b>4. 핵심 지표 시나리오</b>" in text
+    assert "\n3. " in text
     assert len(text) <= REPORT_LIMIT
     assert "##" not in text
     assert "|" not in text
