@@ -54,14 +54,14 @@ class MarketPulseApp:
             errors=errors,
         )
 
-    def send_morning_report(self) -> None:
+    def send_morning_report(self) -> str:
         try:
             data = self.collect_morning_data()
             missing = critical_data_errors(data.quotes)
             if missing:
                 self.telegram.send(render_data_health_alert(missing, data.errors))
                 logging.error("Morning report withheld. Missing critical data: %s", missing)
-                return
+                return "withheld"
             try:
                 analysis = create_morning_analysis(data, self.settings)
             except Exception:
@@ -71,6 +71,7 @@ class MarketPulseApp:
             self.telegram.send(report)
             self.state.add_market_snapshot(data.quotes)
             logging.info("Morning Market Report sent successfully.")
+            return "sent"
         except Exception:
             logging.exception("Morning Market Report failed.")
             raise

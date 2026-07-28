@@ -130,10 +130,11 @@ def create_morning_analysis(data: MarketData, settings: Settings) -> MorningAnal
         "input": _analysis_input(data),
         "text_format": MorningAnalysis,
         "reasoning": {"effort": settings.openai_reasoning_effort},
+        "max_output_tokens": settings.openai_max_output_tokens,
         "store": False,
     }
     if settings.openai_web_search:
-        request["tools"] = [{"type": "web_search"}]
+        request["tools"] = [{"type": "web_search", "search_context_size": "low"}]
     try:
         response = client.responses.parse(**request)
     except Exception:
@@ -392,10 +393,11 @@ def create_emergency_analysis(
         "input": json.dumps(payload, ensure_ascii=False),
         "text_format": EmergencyAnalysis,
         "reasoning": {"effort": settings.openai_reasoning_effort},
+        "max_output_tokens": settings.openai_max_output_tokens,
         "store": False,
     }
     if settings.openai_web_search:
-        request["tools"] = [{"type": "web_search"}]
+        request["tools"] = [{"type": "web_search", "search_context_size": "low"}]
     response = client.responses.parse(**request)
     analysis = response.output_parsed
     if analysis is None:

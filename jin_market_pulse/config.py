@@ -39,6 +39,10 @@ class Settings:
     enable_emergency_alerts: bool
     run_on_start: bool
     request_timeout_seconds: int
+    run_mode: str = "worker"
+    cron_secret: str = ""
+    port: int = 8000
+    openai_max_output_tokens: int = 2500
 
     @property
     def state_file(self) -> Path:
@@ -59,8 +63,8 @@ class Settings:
             telegram_bot_token=secret("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=secret("TELEGRAM_CHAT_ID"),
             openai_api_key=secret("OPENAI_API_KEY"),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6").strip(),
-            openai_reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "medium").strip(),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip(),
+            openai_reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "low").strip(),
             openai_web_search=env_bool("OPENAI_WEB_SEARCH", True),
             fmp_api_key=os.getenv("FMP_API_KEY", "").strip() or None,
             state_dir=state_dir,
@@ -68,4 +72,10 @@ class Settings:
             enable_emergency_alerts=env_bool("ENABLE_EMERGENCY_ALERTS", False),
             run_on_start=env_bool("RUN_ON_START", False),
             request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25")),
+            run_mode=os.getenv("RUN_MODE", "worker").strip().lower(),
+            cron_secret=os.getenv("CRON_SECRET", "").strip(),
+            port=int(os.getenv("PORT", "8000")),
+            openai_max_output_tokens=int(
+                os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2500")
+            ),
         )

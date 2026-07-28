@@ -1,5 +1,29 @@
 # JIN Market Pulse v2
 
+## Low-cost serverless mode
+
+The production target is one morning report per day with Railway Serverless:
+
+```text
+RUN_MODE=serverless
+RUN_ON_START=false
+OPENAI_MODEL=gpt-5.6-luna
+OPENAI_REASONING_EFFORT=low
+OPENAI_MAX_OUTPUT_TOKENS=2500
+OPENAI_WEB_SEARCH=true
+ENABLE_EMERGENCY_ALERTS=false
+```
+
+GitHub Actions calls `POST /jobs/morning` at `06:50 KST`. The endpoint requires
+`Authorization: Bearer <CRON_SECRET>`. Store `CRON_SECRET` only in Railway
+Variables and GitHub Actions secrets. Store the Railway public service URL as
+the GitHub Actions secret `RAILWAY_JOB_URL`.
+
+This mode does not run real-time emergency or event monitoring. It keeps the
+service asleep outside the daily report job to target a low monthly bill.
+Provider usage and billing can vary, so the budget is a target rather than a
+guaranteed cap.
+
 한국어 Telegram 시장 브리핑 봇입니다. Railway의 백그라운드 worker로 실행됩니다.
 
 v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 정확성과 가독성입니다.
