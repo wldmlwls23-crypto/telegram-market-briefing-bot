@@ -67,7 +67,9 @@ class NewsItem(BaseModel):
 class SignalSelection(BaseModel):
     candidate_id: str
     title_ko: str = Field(min_length=2, max_length=70)
-    meaning: str = Field(min_length=5, max_length=220)
+    meaning: str = Field(min_length=5, max_length=140)
+    related_asset_keys: list[str] = Field(default_factory=list, max_length=3)
+    relation: Literal["원인 후보", "시장 배경", "엇갈림"] = "시장 배경"
 
 
 class SensitivitySelection(BaseModel):
@@ -75,12 +77,7 @@ class SensitivitySelection(BaseModel):
 
 
 class MorningAnalysis(BaseModel):
-    headline: str = Field(min_length=5, max_length=150)
-    signals: list[SignalSelection] = Field(default_factory=list, max_length=3)
-    cross_asset_chain: str = Field(min_length=5, max_length=240)
-    sensitivities: list[SensitivitySelection] = Field(default_factory=list, max_length=2)
-    priority_event_ids: list[str] = Field(default_factory=list, max_length=3)
-    priority_asset_keys: list[str] = Field(default_factory=list, max_length=3)
+    signals: list[SignalSelection] = Field(default_factory=list, max_length=2)
 
 
 class EmergencyAnalysis(BaseModel):
@@ -95,4 +92,17 @@ class MarketData(BaseModel):
     quotes: dict[str, AssetQuote]
     events: list[EconomicEvent]
     news: list[NewsItem]
+    btc_series: "PriceSeries | None" = None
     errors: list[str] = Field(default_factory=list)
+
+
+class PricePoint(BaseModel):
+    timestamp: datetime
+    value: float
+
+
+class PriceSeries(BaseModel):
+    key: str
+    name: str
+    points: list[PricePoint]
+    source: str

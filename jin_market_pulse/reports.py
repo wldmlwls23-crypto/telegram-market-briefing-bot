@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 
@@ -18,6 +20,8 @@ from .models import (
 )
 
 
+UTC = timezone.utc
+REPORT_LIMIT = 2000
 FORBIDDEN_PHRASES = {
     "확인 필요",
     "매수해도 된다",
@@ -29,24 +33,41 @@ FORBIDDEN_PHRASES = {
     "내릴 가능성이 높다",
     "강력 추천",
 }
-SNAPSHOT_ORDER = [
-    "btc",
-    "eth",
-    "nasdaq100",
-    "sp500",
-    "dxy",
-    "us2y",
-    "us10y",
-    "kospi",
-    "kosdaq",
-    "usdkrw",
-    "wti",
-    "gold",
-]
+CORE_ASSET_KEYS = ("btc", "nasdaq100", "dxy", "us10y", "kospi", "wti")
+EXTRA_THRESHOLDS = {
+    "eth": 3.0,
+    "sp500": 1.5,
+    "dow": 1.5,
+    "kosdaq": 1.5,
+    "usdkrw": 0.7,
+    "gold": 1.5,
+}
+TIER_ONE_PUBLISHERS = {
+    "reuters",
+    "bloomberg",
+    "associated press",
+    "ap news",
+    "financial times",
+    "the wall street journal",
+    "wsj",
+}
+REQUIRED_HEADINGS = (
+    "<b>0. 현재 시장</b>",
+    "<b>1. 핵심 신호</b>",
+    "<b>2. 오늘 일정</b>",
+    "<b>3. 시장 연결</b>",
+    "<b>4. 지표 시나리오</b>",
+    "<b>5. 오늘 관찰 순서</b>",
+)
+
+
+def _short(text: str, limit: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text.replace("|", " ").replace("#", " ")).strip()
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1].rstrip() + "…"
 
 
 def _clean_ai_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", text.replace("|", " ")).strip()
+    cleaned = _short(text, 220)
     for phrase in FORBIDDEN_PHRASES:
         cleaned = cleaned.replace(phrase, "")
     return cleaned.strip(" -")
@@ -54,10 +75,9 @@ def _clean_ai_text(text: str) -> str:
 
 def _contains_generated_number(analysis: MorningAnalysis) -> bool:
     values = [
-        analysis.headline,
-        analysis.cross_asset_chain,
-        *[signal.title_ko for signal in analysis.signals],
-        *[signal.meaning for signal in analysis.signals],
+        value
+        for signal in analysis.signals
+        for value in (signal.title_ko, signal.meaning)
     ]
     return any(re.search(r"\d", value) for value in values)
 
@@ -67,6 +87,10 @@ def _quote_payload(quote: AssetQuote) -> dict[str, object]:
         "key": quote.key,
         "name_ko": quote.name_ko,
         "kind": quote.kind,
+        "current": quote.current,
+        "previous": quote.previous,
+        "percent_change": quote.percent_change,
+        "absolute_change": quote.absolute_change,
         "direction": (
             "상승"
             if (quote.absolute_change or 0) > 0
@@ -79,28 +103,75 @@ def _quote_payload(quote: AssetQuote) -> dict[str, object]:
     }
 
 
+def _publisher_is_tier_one(publisher: str) -> bool:
+    normalized = publisher.lower()
+    return any(name in normalized for name in TIER_ONE_PUBLISHERS)
+
+
+def _story_tokens(item: NewsItem) -> set[str]:
+    title = re.sub(r"\s+-\s+[^-]{2,50}$", "", item.title.lower())
+    return {
+        token
+        for token in re.findall(r"[a-z0-9가-힣]+", title)
+        if len(token) > 2
+        and token not in {"the", "and", "for", "with", "from", "after"}
+    }
+
+
+def _same_story(left: NewsItem, right: NewsItem) -> bool:
+    if left.topic_key == right.topic_key:
+        return True
+    left_tokens = _story_tokens(left)
+    right_tokens = _story_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    return overlap / union >= 0.55
+
+
+def qualified_morning_news(data: MarketData) -> list[NewsItem]:
+    cutoff = data.generated_at_kst.astimezone(UTC) - timedelta(hours=24)
+    recent = [
+        item
+        for item in data.news
+        if item.published_at is not None
+        and item.published_at.astimezone(UTC) >= cutoff
+    ]
+    grouped: dict[str, list[NewsItem]] = defaultdict(list)
+    for item in recent:
+        grouped[item.topic_key].append(item)
+
+    qualified: list[NewsItem] = []
+    for item in recent:
+        publishers = {
+            candidate.publisher.lower() for candidate in grouped[item.topic_key]
+        }
+        if (
+            item.official_source
+            or _publisher_is_tier_one(item.publisher)
+            or len(publishers) >= 2
+        ):
+            qualified.append(item)
+    return qualified[:16]
+
+
 def _analysis_input(data: MarketData) -> str:
     payload = {
         "generated_at_kst": data.generated_at_kst.isoformat(),
-        "asset_directions": [_quote_payload(quote) for quote in data.quotes.values()],
+        "assets": [_quote_payload(quote) for quote in data.quotes.values()],
         "news_candidates": [
             {
                 "candidate_id": item.news_id,
+                "topic_key": item.topic_key,
                 "title": item.title,
                 "publisher": item.publisher,
-                "published_at": item.published_at.isoformat() if item.published_at else "",
+                "published_at": item.published_at.isoformat()
+                if item.published_at
+                else "",
                 "summary": item.summary,
             }
-            for item in data.news[:16]
-        ],
-        "future_events": [
-            {
-                "event_id": event.event_id,
-                "title_ko": event.title_ko,
-                "country_ko": event.country_ko,
-                "importance": event.importance,
-            }
-            for event in data.events[:8]
+            for item in qualified_morning_news(data)
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -108,25 +179,26 @@ def _analysis_input(data: MarketData) -> str:
 
 def create_morning_analysis(data: MarketData, settings: Settings) -> MorningAnalysis:
     client = OpenAI(api_key=settings.openai_api_key)
-    instructions = """
-당신은 한국 개인투자자를 위한 관찰형 시장 편집자입니다.
-입력에 있는 후보와 자산 방향만 사용해 아침에 볼 핵심을 선별하세요.
-
-반드시 지킬 규칙:
-- 뉴스 후보는 최대 3개만 선택하고 candidate_id를 그대로 반환합니다.
-- title_ko는 선택한 영어 제목의 짧고 정확한 한국어 번역이어야 합니다.
-- meaning은 왜 달러, 미국채, Nasdaq, BTC에 중요한지만 쉬운 한국어로 설명합니다.
-- 원자료에 없는 원인, 결과, 수급, 가격, 발언을 만들지 않습니다.
-- 출력 텍스트에는 숫자, 날짜, 시간, 별표, 표, 파이프 문자를 쓰지 않습니다.
-- 자산이 함께 움직였다는 사실과 인과관계를 구분합니다.
-- 매수, 매도, 롱, 숏, 손절, 가격 전망을 쓰지 않습니다.
-- future_events에서 오늘 중요한 event_id만 고릅니다.
-- priority_asset_keys는 입력에 존재하는 key만 사용합니다.
-- 중요한 뉴스가 없으면 signals는 빈 배열로 둡니다.
-""".strip()
     request: dict[str, object] = {
         "model": settings.openai_model,
-        "instructions": instructions,
+        "instructions": """
+당신은 한국 개인투자자를 위한 시장 뉴스 편집자입니다.
+검증된 뉴스 후보 중 실제 핵심 자산 움직임을 이해하는 데 필요한 뉴스만 최대 두 건 고릅니다.
+
+규칙:
+- candidate_id는 입력 값을 그대로 사용합니다.
+- 같은 topic_key 사건은 한 건만 고릅니다.
+- title_ko는 짧고 정확한 한국어 번역으로 씁니다.
+- meaning은 왜 관련 자산에 중요한지 한 문장으로 씁니다.
+- related_asset_keys에는 입력에 존재하는 자산 key만 최대 세 개 넣습니다.
+- 확인된 직접 원인이 아니면 relation을 '시장 배경'으로 둡니다.
+- 자산 반응이 뉴스와 반대면 relation을 '엇갈림'으로 둡니다.
+- 뉴스가 가격 움직임을 직접 설명한다고 신뢰할 때만 '원인 후보'로 둡니다.
+- 출력 문장에는 숫자, 날짜, 시간, 별표, 표, 파이프 문자를 쓰지 않습니다.
+- 입력에 없는 사실, 원인, 수급, 발언을 만들지 않습니다.
+- 매수·매도·전망·가격 목표를 쓰지 않습니다.
+- 중요 뉴스가 없으면 signals를 빈 배열로 둡니다.
+""".strip(),
         "input": _analysis_input(data),
         "text_format": MorningAnalysis,
         "reasoning": {"effort": settings.openai_reasoning_effort},
@@ -140,69 +212,45 @@ def create_morning_analysis(data: MarketData, settings: Settings) -> MorningAnal
     except Exception:
         if "tools" not in request:
             raise
-        logging.warning("OpenAI web search path failed; retrying structured analysis without it.")
+        logging.warning("OpenAI web search path failed; retrying without it.")
         request.pop("tools", None)
         response = client.responses.parse(**request)
     analysis = response.output_parsed
     if analysis is None:
         raise RuntimeError("OpenAI returned no structured MorningAnalysis")
     if _contains_generated_number(analysis):
-        raise RuntimeError("OpenAI analysis contained a number not allowed by the output contract")
+        raise RuntimeError("OpenAI analysis contained a generated number")
     return _validated_analysis(analysis, data)
 
 
-def _validated_analysis(analysis: MorningAnalysis, data: MarketData) -> MorningAnalysis:
-    news_ids = {item.news_id for item in data.news}
-    event_ids = {event.event_id for event in data.events}
-    asset_keys = set(data.quotes)
-    analysis.headline = _clean_ai_text(analysis.headline)
-    analysis.cross_asset_chain = _clean_ai_text(analysis.cross_asset_chain)
-    analysis.signals = [
-        signal
-        for signal in analysis.signals
-        if signal.candidate_id in news_ids
-    ][:3]
+def _validated_analysis(
+    analysis: MorningAnalysis,
+    data: MarketData,
+) -> MorningAnalysis:
+    news_map = {item.news_id: item for item in qualified_morning_news(data)}
+    seen_news: list[NewsItem] = []
+    validated = []
     for signal in analysis.signals:
-        signal.title_ko = _clean_ai_text(signal.title_ko)
-        signal.meaning = _clean_ai_text(signal.meaning)
-    analysis.sensitivities = [
-        item for item in analysis.sensitivities if item.event_id in event_ids
-    ][:2]
-    analysis.priority_event_ids = [
-        event_id for event_id in analysis.priority_event_ids if event_id in event_ids
-    ][:3]
-    analysis.priority_asset_keys = [
-        key for key in analysis.priority_asset_keys if key in asset_keys
-    ][:3]
-    return analysis
+        news = news_map.get(signal.candidate_id)
+        if not news or any(_same_story(news, seen) for seen in seen_news):
+            continue
+        related = [
+            key for key in signal.related_asset_keys if key in data.quotes
+        ][:3]
+        if not related:
+            continue
+        signal.title_ko = _short(_clean_ai_text(signal.title_ko), 55)
+        signal.meaning = _short(_clean_ai_text(signal.meaning), 105)
+        signal.related_asset_keys = related
+        seen_news.append(news)
+        validated.append(signal)
+        if len(validated) == 2:
+            break
+    return MorningAnalysis(signals=validated)
 
 
 def fallback_morning_analysis(data: MarketData) -> MorningAnalysis:
-    dxy = data.quotes.get("dxy")
-    rates = data.quotes.get("us10y") or data.quotes.get("us2y")
-    nasdaq = data.quotes.get("nasdaq100")
-    btc = data.quotes.get("btc")
-
-    def direction(quote: AssetQuote | None) -> str:
-        if not quote or quote.absolute_change is None:
-            return "변화 제한"
-        return "상승" if quote.absolute_change > 0 else "하락" if quote.absolute_change < 0 else "보합"
-
-    headline = (
-        f"달러는 {direction(dxy)}, 미국채 금리는 {direction(rates)}, "
-        f"Nasdaq은 {direction(nasdaq)}, BTC는 {direction(btc)} 흐름입니다."
-    )
-    chain = "달러와 금리 변화가 기술주와 BTC에 같은 압력으로 이어지는지 관찰합니다."
-    return MorningAnalysis(
-        headline=headline,
-        signals=[],
-        cross_asset_chain=chain,
-        sensitivities=[],
-        priority_event_ids=[event.event_id for event in data.events[:3]],
-        priority_asset_keys=[key for key in ("dxy", "us10y", "nasdaq100", "btc") if key in data.quotes][
-            :3
-        ],
-    )
+    return MorningAnalysis(signals=[])
 
 
 def _format_number(value: float, quote: AssetQuote) -> str:
@@ -220,156 +268,259 @@ def _format_number(value: float, quote: AssetQuote) -> str:
     return f"{value:,.2f}"
 
 
+def _movement(quote: AssetQuote) -> tuple[str, str]:
+    change = quote.absolute_change
+    arrow = "▲" if (change or 0) > 0 else "▼" if (change or 0) < 0 else "•"
+    if quote.kind == "yield" and change is not None:
+        return arrow, f"{abs(change * 100):.1f}bp"
+    if quote.percent_change is not None:
+        return arrow, f"{abs(quote.percent_change):.2f}%"
+    return arrow, ""
+
+
 def format_quote(quote: AssetQuote) -> str:
     current = _format_number(quote.current, quote)
-    as_of = quote.as_of.astimezone(KST).strftime("%m/%d %H:%M")
-    if quote.previous is None or quote.absolute_change is None:
-        return f"- {quote.name_ko}: {current} / {as_of} KST"
-    previous = _format_number(quote.previous, quote)
-    if quote.kind == "yield":
-        change = quote.absolute_change * 100
+    arrow, movement = _movement(quote)
+    if quote.previous is not None and movement:
+        previous = _format_number(quote.previous, quote)
         return (
-            f"- {quote.name_ko}: {current} / {quote.comparison_label} {previous} "
-            f"→ {change:+.1f}bp / {as_of} KST"
+            f"- {quote.name_ko}: {current} / {quote.comparison_label} "
+            f"{previous} → {arrow}{movement}"
         )
-    percent = quote.percent_change
-    percent_text = f"{percent:+.2f}%" if percent is not None else ""
+    return f"- {quote.name_ko}: {current} · {quote.as_of.astimezone(KST):%m/%d %H:%M} KST"
+
+
+def _format_quote_html(quote: AssetQuote) -> str:
+    current = html.escape(_format_number(quote.current, quote))
+    arrow, movement = _movement(quote)
+    comparison = "24시간" if quote.key == "btc" else quote.comparison_label
+    move_text = f" {arrow}{movement}" if movement else ""
     return (
-        f"- {quote.name_ko}: {current} / {quote.comparison_label} {previous} "
-        f"→ {percent_text} / {as_of} KST"
+        f"- {html.escape(quote.name_ko)} <b>{current}</b>{move_text}"
+        f" · {html.escape(_short(comparison, 18))}"
     )
 
 
-def _event_by_id(events: list[EconomicEvent]) -> dict[str, EconomicEvent]:
-    return {event.event_id: event for event in events}
+def select_report_assets(quotes: dict[str, AssetQuote]) -> list[AssetQuote]:
+    selected = [quotes[key] for key in CORE_ASSET_KEYS if key in quotes]
+    extras: list[tuple[float, AssetQuote]] = []
+    for key, threshold in EXTRA_THRESHOLDS.items():
+        quote = quotes.get(key)
+        if quote and quote.percent_change is not None:
+            ratio = abs(quote.percent_change) / threshold
+            if ratio >= 1:
+                extras.append((ratio, quote))
+    if extras:
+        selected.append(max(extras, key=lambda item: item[0])[1])
+    return selected
+
+
+def select_future_events(data: MarketData) -> list[EconomicEvent]:
+    start = data.generated_at_kst
+    end = start + timedelta(hours=24)
+    candidates = [
+        event
+        for event in data.events
+        if start <= event.event_time_kst <= end
+    ]
+    priority = sorted(
+        candidates,
+        key=lambda event: (
+            -len(event.importance),
+            event.event_time_kst,
+        ),
+    )[:3]
+    return sorted(priority, key=lambda event: event.event_time_kst)
+
+
+def _axis_text(quote: AssetQuote | None, label: str) -> str:
+    if not quote:
+        return ""
+    arrow, movement = _movement(quote)
+    return f"{label}{arrow}{movement}"
+
+
+def _market_summary(quotes: dict[str, AssetQuote]) -> tuple[str, str]:
+    rate = quotes.get("us10y") or quotes.get("us2y")
+    pieces = [
+        _axis_text(quotes.get("dxy"), "달러"),
+        _axis_text(rate, "금리"),
+        _axis_text(quotes.get("nasdaq100"), "Nasdaq"),
+        _axis_text(quotes.get("btc"), "BTC"),
+    ]
+    first = " · ".join(piece for piece in pieces if piece)
+
+    dxy_change = (quotes.get("dxy").absolute_change if quotes.get("dxy") else None)
+    rate_change = rate.absolute_change if rate else None
+    nasdaq_change = (
+        quotes.get("nasdaq100").absolute_change if quotes.get("nasdaq100") else None
+    )
+    btc_change = quotes.get("btc").absolute_change if quotes.get("btc") else None
+    if (
+        dxy_change is not None
+        and rate_change is not None
+        and dxy_change > 0
+        and rate_change > 0
+    ):
+        second = (
+            "달러·금리 상승 부담이 위험자산에도 반영됐습니다."
+            if (nasdaq_change or 0) < 0 and (btc_change or 0) < 0
+            else "달러·금리 상승에도 위험자산 반응은 엇갈렸습니다."
+        )
+    elif (
+        dxy_change is not None
+        and rate_change is not None
+        and dxy_change < 0
+        and rate_change < 0
+    ):
+        second = (
+            "달러·금리 하락 흐름이 위험자산에도 반영됐습니다."
+            if (nasdaq_change or 0) > 0 and (btc_change or 0) > 0
+            else "완화 흐름이 모든 위험자산으로 이어지지는 않았습니다."
+        )
+    else:
+        second = "달러와 금리 방향이 엇갈려 Nasdaq과 BTC 반응을 따로 봐야 합니다."
+    return first, second
 
 
 def _news_by_id(news: list[NewsItem]) -> dict[str, NewsItem]:
     return {item.news_id: item for item in news}
 
 
-def render_morning_report(data: MarketData, analysis: MorningAnalysis) -> str:
-    event_map = _event_by_id(data.events)
+def _event_values(event: EconomicEvent) -> str:
+    values = []
+    if event.forecast:
+        values.append(f"예상 {event.forecast}")
+    if event.previous:
+        values.append(f"이전 {event.previous}")
+    return " · ".join(values)
+
+
+def _signal_reaction(signal: object, data: MarketData) -> str:
+    keys = getattr(signal, "related_asset_keys", [])
+    return " · ".join(
+        _axis_text(data.quotes.get(key), data.quotes[key].name_ko)
+        for key in keys
+        if key in data.quotes
+    )
+
+
+def _render_report(
+    data: MarketData,
+    analysis: MorningAnalysis,
+    *,
+    signal_limit: int,
+) -> str:
     news_map = _news_by_id(data.news)
+    events = select_future_events(data)
+    summary, relationship = _market_summary(data.quotes)
     lines = [
-        "# Morning Market Report",
-        data.generated_at_kst.strftime("%Y-%m-%d %H:%M KST"),
+        "<b>JIN Market Pulse</b>",
+        data.generated_at_kst.strftime("%m/%d %H:%M KST"),
         "",
-        analysis.headline,
+        "<b>한눈에</b>",
+        html.escape(relationship),
         "",
-        "## 0. [Current Asset Snapshot]",
+        REQUIRED_HEADINGS[0],
     ]
-    for key in SNAPSHOT_ORDER:
-        quote = data.quotes.get(key)
-        if quote:
-            lines.append(format_quote(quote))
-    sources = ", ".join(sorted({quote.source for quote in data.quotes.values()}))
-    lines.extend(["", f"데이터 출처: {sources}", "", "## 1. [Signal vs Noise]"])
-    if analysis.signals:
-        for signal in analysis.signals:
-            news = news_map[signal.candidate_id]
-            lines.extend(
-                [
-                    f"- {signal.title_ko}",
-                    f"  의미: {signal.meaning}",
-                    f"  출처: {news.publisher}",
-                ]
-            )
-    else:
-        lines.append("- 가격 흐름을 넘어설 만큼 검증된 신규 핵심 뉴스는 제한적입니다.")
+    lines.extend(_format_quote_html(quote) for quote in select_report_assets(data.quotes))
 
-    lines.extend(["", "## 2. [Economic Calendar]"])
-    future_events = [
-        event
-        for event in data.events
-        if event.event_time_kst >= data.generated_at_kst
-        and event.event_time_kst.astimezone(KST).date()
-        == data.generated_at_kst.astimezone(KST).date()
-    ][:5]
-    future_event_map = _event_by_id(future_events)
-    if not future_events:
-        lines.append("- 현재 시각 이후 중요도 높은 일정이 없습니다.")
-    for event in future_events:
-        lines.append(
-            f"- {event.event_time_kst.strftime('%m/%d %H:%M')} KST / "
-            f"{event.country_ko} / {event.title_ko} / {event.importance}"
+    lines.extend(["", REQUIRED_HEADINGS[1]])
+    signals = analysis.signals[:signal_limit]
+    if not signals:
+        lines.append("- 가격 흐름을 넘어설 신규 핵심 뉴스는 제한적")
+    for index, signal in enumerate(signals, start=1):
+        news = news_map.get(signal.candidate_id)
+        if not news:
+            continue
+        published = (
+            news.published_at.astimezone(KST).strftime("%H:%M")
+            if news.published_at
+            else ""
         )
-        if event.value_summary:
-            lines.append(f"  값: {event.value_summary}")
-        lines.append(f"  의미: {event.sensitivity_stronger}")
-
-    lines.extend(["", "## 3. [Market Pulse]", f"- {analysis.cross_asset_chain}"])
-    lines.extend(["", "## 4. [Indicator Sensitivity]"])
-    selected_sensitivity_ids = [item.event_id for item in analysis.sensitivities]
-    if not selected_sensitivity_ids:
-        selected_sensitivity_ids = [event.event_id for event in future_events[:2]]
-    selected_events = [
-        future_event_map[event_id]
-        for event_id in selected_sensitivity_ids
-        if event_id in future_event_map
-    ][:2]
-    if not selected_events:
-        lines.append("- 오늘 직접 연결할 중요 지표 시나리오가 없습니다.")
-    for event in selected_events:
+        source = " · ".join(
+            part
+            for part in (_short(news.publisher, 28), published)
+            if part
+        )
         lines.extend(
             [
-                f"- {event.title_ko}",
-                f"  강하게 나오면: {event.sensitivity_stronger}",
-                f"  약하게 나오면: {event.sensitivity_weaker}",
+                f"{index}) <b>{html.escape(signal.title_ko)}</b>",
+                f"반응: {html.escape(_signal_reaction(signal, data))}",
+                f"{html.escape(signal.relation)}: {html.escape(signal.meaning)}",
+                f"<i>{html.escape(source)}</i>",
             ]
         )
 
-    lines.extend(["", "## 5. [Today's Priority]"])
-    priority_labels: list[str] = []
-    for event_id in analysis.priority_event_ids:
-        if event_id in future_event_map:
-            priority_labels.append(future_event_map[event_id].title_ko)
-    for key in analysis.priority_asset_keys:
-        if key in data.quotes:
-            priority_labels.append(data.quotes[key].name_ko)
-    if not priority_labels:
-        priority_labels = [
-            event.title_ko for event in future_events[:2]
-        ] + [
-            data.quotes[key].name_ko
-            for key in ("dxy", "us10y", "nasdaq100")
-            if key in data.quotes
-        ]
-    for index, label in enumerate(dict.fromkeys(priority_labels), start=1):
-        if index > 3:
-            break
-        lines.append(f"{index}. {label}")
-    first_priority = next(iter(dict.fromkeys(priority_labels)), "달러와 금리 흐름")
+    lines.extend(["", REQUIRED_HEADINGS[2]])
+    if not events:
+        lines.append("- 앞으로 24시간 내 주요 일정 없음")
+    for event in events:
+        lines.append(
+            f"- {event.event_time_kst:%m/%d %H:%M} "
+            f"<b>{html.escape(_short(event.title_ko, 32))}</b>"
+        )
+        values = _event_values(event)
+        if values:
+            lines.append(f"  {html.escape(_short(values, 55))}")
+
     lines.extend(
         [
             "",
-            f"오늘 핵심은 {first_priority} → DXY → 미국채 금리 → Nasdaq → BTC 순서로 관찰.",
+            REQUIRED_HEADINGS[3],
+            html.escape(summary),
+            "",
+            REQUIRED_HEADINGS[4],
         ]
     )
-    result = "\n".join(lines).strip()
-    validate_rendered_report(result)
-    return result
+    if events:
+        focus = max(events, key=lambda event: (len(event.importance), -event.event_time_kst.timestamp()))
+        lines.extend(
+            [
+                f"- <b>{html.escape(_short(focus.title_ko, 32))}</b>",
+                f"상회: {html.escape(_short(focus.sensitivity_stronger, 76))}",
+                f"하회: {html.escape(_short(focus.sensitivity_weaker, 76))}",
+            ]
+        )
+    else:
+        lines.append("- 예정된 핵심 지표 시나리오 없음")
+
+    lines.extend(["", REQUIRED_HEADINGS[5]])
+    priorities: list[str] = []
+    if events:
+        focus = max(events, key=lambda event: (len(event.importance), -event.event_time_kst.timestamp()))
+        priorities.append(f"{focus.event_time_kst:%H:%M} {focus.title_ko} 결과")
+    priorities.extend(["DXY → 미국채 10년물", "Nasdaq → BTC"])
+    for index, value in enumerate(priorities[:3], start=1):
+        lines.append(f"{index}. {html.escape(_short(value, 48))}")
+    return "\n".join(lines).strip()
+
+
+def render_morning_report(data: MarketData, analysis: MorningAnalysis) -> str:
+    for signal_limit in (2, 1, 0):
+        result = _render_report(data, analysis, signal_limit=signal_limit)
+        try:
+            validate_rendered_report(result)
+            return result
+        except ValueError as exc:
+            if "exceeds" not in str(exc):
+                raise
+    raise ValueError("Morning report exceeds 2000 characters after compaction")
 
 
 def validate_rendered_report(text: str) -> None:
     for phrase in FORBIDDEN_PHRASES:
         if phrase in text:
             raise ValueError(f"Forbidden phrase in report: {phrase}")
-    if "|" in text:
-        raise ValueError("Pipe character is forbidden in Telegram report")
+    if "|" in text or "#" in text:
+        raise ValueError("Table and Markdown heading characters are forbidden")
     if "N/A" in text:
         raise ValueError("N/A is forbidden in Telegram report")
-    required = [
-        "## 0. [Current Asset Snapshot]",
-        "## 1. [Signal vs Noise]",
-        "## 2. [Economic Calendar]",
-        "## 3. [Market Pulse]",
-        "## 4. [Indicator Sensitivity]",
-        "## 5. [Today's Priority]",
-    ]
-    missing = [heading for heading in required if heading not in text]
+    missing = [heading for heading in REQUIRED_HEADINGS if heading not in text]
     if missing:
         raise ValueError(f"Missing required report sections: {missing}")
+    if len(text) > REPORT_LIMIT:
+        raise ValueError(f"Morning report exceeds {REPORT_LIMIT} characters")
 
 
 def create_emergency_analysis(

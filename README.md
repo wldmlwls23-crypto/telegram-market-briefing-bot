@@ -1,4 +1,4 @@
-# JIN Market Pulse v2
+# JIN Market Pulse v2.1
 
 ## Low-cost serverless mode
 
@@ -24,12 +24,17 @@ service asleep outside the daily report job to target a low monthly bill.
 Provider usage and billing can vary, so the budget is a target rather than a
 guaranteed cap.
 
+The Telegram webhook also wakes the same serverless service only when the
+authorized chat asks for a numeric market lookup. These lookups do not call
+OpenAI.
+
 한국어 Telegram 시장 브리핑 봇입니다. Railway의 백그라운드 worker로 실행됩니다.
 
 v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 정확성과 가독성입니다.
 
 ## 현재 활성 기능
 
+- BTC 24시간 PNG 차트와 2,000자 이내 HTML 모닝 리포트
 - BTC와 ETH 현재가 및 24시간 변화
 - Nasdaq 100, S&P 500, Dow, KOSPI, KOSDAQ
 - DXY, 원/달러, WTI 유가, 금
@@ -41,6 +46,7 @@ v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 �
 - 실제 발표값과 발표 전후 시장 반응 업데이트
 - 신뢰 가능한 출처 기반 긴급 알림
 - Railway Volume을 이용한 중복 방지 상태 유지
+- Telegram 숫자 조회: `/price`, `/markets`, `/calendar` 및 한국어 자산명
 
 한국, 유럽, 미국 세션별 리포트는 모닝 리포트 검증이 끝난 뒤 v2.1에서 순차 활성화합니다.
 
@@ -74,6 +80,7 @@ v2의 우선 목표는 매일 06:50 KST에 보내는 Morning Market Report의 �
 ```text
 TELEGRAM_BOT_TOKEN=실제 값
 TELEGRAM_CHAT_ID=실제 값
+TELEGRAM_WEBHOOK_SECRET=별도의 긴 무작위 값
 OPENAI_API_KEY=실제 값
 OPENAI_MODEL=gpt-5.6
 OPENAI_REASONING_EFFORT=medium
@@ -92,6 +99,22 @@ FMP_API_KEY=
 ```
 
 비밀값은 Railway Variables에서만 관리합니다.
+
+## Telegram 숫자 조회
+
+허용된 `TELEGRAM_CHAT_ID`에서만 다음 조회를 사용할 수 있습니다.
+
+```text
+비트 얼마야
+ETH 변동
+/price gold
+/markets
+/calendar
+```
+
+지원 자산은 BTC, ETH, S&P 500, Nasdaq 100, Dow, DXY, 미국채 2년·10년,
+KOSPI, KOSDAQ, 원달러, WTI, 금입니다. 가격·변동·일정 조회는 OpenAI를
+호출하지 않으며 매매 판단과 가격 전망에는 답하지 않습니다.
 
 ## Railway Volume 연결
 

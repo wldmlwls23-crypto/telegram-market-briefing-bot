@@ -14,10 +14,16 @@ from .alerts import (
     send_due_pre_event_reminders,
 )
 from .calendar import fetch_economic_events
+from .chart import render_btc_chart
 from .config import KST, Settings
 from .models import MarketData
 from .news import fetch_news
-from .providers import critical_data_errors, fetch_market_quotes
+from .providers import (
+    btc_quote_from_series,
+    critical_data_errors,
+    fetch_btc_intraday_series,
+    fetch_market_quotes,
+)
 from .reports import (
     create_morning_analysis,
     fallback_morning_analysis,
@@ -46,11 +52,19 @@ class MarketPulseApp:
         quotes, errors = fetch_market_quotes(self.settings)
         events = fetch_economic_events(self.settings, days_ahead=4)
         news = fetch_news()
+        btc_series = None
+        try:
+            btc_series = fetch_btc_intraday_series(self.settings)
+            quotes["btc"] = btc_quote_from_series(btc_series)
+        except Exception as exc:
+            errors.append(f"BTC chart: {exc}")
+            logging.warning("BTC chart data unavailable; sending text only.")
         return MarketData(
             generated_at_kst=datetime.now(KST),
             quotes=quotes,
             events=events,
             news=news,
+            btc_series=btc_series,
             errors=errors,
         )
 
@@ -68,7 +82,12 @@ class MarketPulseApp:
                 logging.exception("OpenAI morning analysis failed; using data-only fallback.")
                 analysis = fallback_morning_analysis(data)
             report = render_morning_report(data, analysis)
-            self.telegram.send(report)
+            if data.btc_series:
+                try:
+                    self.telegram.send_photo(render_btc_chart(data.btc_series))
+                except Exception:
+                    logging.exception("BTC chart send failed; continuing with text report.")
+            self.telegram.send(report, parse_mode="HTML")
             self.state.add_market_snapshot(data.quotes)
             logging.info("Morning Market Report sent successfully.")
             return "sent"

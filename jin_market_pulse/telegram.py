@@ -46,7 +46,7 @@ class TelegramClient:
         self.settings = settings
         self.base_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, *, parse_mode: str | None = None) -> None:
         parts = split_message(text)
         total = len(parts)
         for index, part in enumerate(parts, start=1):
@@ -54,14 +54,32 @@ class TelegramClient:
             payload = prefix + part
             if len(payload) > TELEGRAM_TEXT_LIMIT:
                 raise ValueError("Telegram message part exceeds 4096 characters")
+            request_body = {
+                "chat_id": self.settings.telegram_chat_id,
+                "text": payload,
+                "disable_web_page_preview": True,
+            }
+            if parse_mode:
+                request_body["parse_mode"] = parse_mode
             response = requests.post(
                 f"{self.base_url}/sendMessage",
-                json={
-                    "chat_id": self.settings.telegram_chat_id,
-                    "text": payload,
-                    "disable_web_page_preview": True,
-                },
+                json=request_body,
                 timeout=self.settings.request_timeout_seconds,
             )
             response.raise_for_status()
             logging.info("Telegram message part %s/%s sent.", index, total)
+
+    def send_photo(
+        self,
+        content: bytes,
+        *,
+        filename: str = "btc-24h.png",
+    ) -> None:
+        response = requests.post(
+            f"{self.base_url}/sendPhoto",
+            data={"chat_id": self.settings.telegram_chat_id},
+            files={"photo": (filename, content, "image/png")},
+            timeout=max(self.settings.request_timeout_seconds, 30),
+        )
+        response.raise_for_status()
+        logging.info("Telegram BTC chart sent.")

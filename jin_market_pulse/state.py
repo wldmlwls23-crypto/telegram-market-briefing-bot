@@ -20,7 +20,13 @@ class StateStore:
         self._lock = RLock()
 
     def _empty(self) -> dict[str, Any]:
-        return {"version": 2, "alerts": {}, "events": {}, "market_snapshots": []}
+        return {
+            "version": 3,
+            "alerts": {},
+            "events": {},
+            "market_snapshots": [],
+            "telegram_update_ids": [],
+        }
 
     def load(self) -> dict[str, Any]:
         with self._lock:
@@ -138,6 +144,27 @@ class StateStore:
             if datetime.fromisoformat(item["captured_at"]) >= cutoff
         ]
         self.save(data)
+
+    def claim_telegram_update(self, update_id: int) -> bool:
+        with self._lock:
+            data = self.load()
+            update_ids = data.setdefault("telegram_update_ids", [])
+            if update_id in update_ids:
+                return False
+            update_ids.append(update_id)
+            data["telegram_update_ids"] = update_ids[-100:]
+            self.save(data)
+            return True
+
+    def forget_telegram_update(self, update_id: int) -> None:
+        with self._lock:
+            data = self.load()
+            data["telegram_update_ids"] = [
+                value
+                for value in data.get("telegram_update_ids", [])
+                if value != update_id
+            ]
+            self.save(data)
 
     def _prune(self, data: dict[str, Any]) -> None:
         cutoff = datetime.now(UTC) - timedelta(days=21)

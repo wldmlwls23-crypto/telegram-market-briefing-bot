@@ -41,6 +41,7 @@ class Settings:
     request_timeout_seconds: int
     run_mode: str = "worker"
     cron_secret: str = ""
+    telegram_webhook_secret: str = ""
     port: int = 8000
     openai_max_output_tokens: int = 2500
 
@@ -74,6 +75,9 @@ class Settings:
             request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25")),
             run_mode=os.getenv("RUN_MODE", "worker").strip().lower(),
             cron_secret=os.getenv("CRON_SECRET", "").strip(),
+            telegram_webhook_secret=os.getenv(
+                "TELEGRAM_WEBHOOK_SECRET", ""
+            ).strip(),
             port=int(os.getenv("PORT", "8000")),
             openai_max_output_tokens=int(
                 os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2500")

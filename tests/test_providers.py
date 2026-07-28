@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from jin_market_pulse.providers import (
+    btc_quote_from_series,
     critical_data_errors,
+    fetch_btc_intraday_series,
     fetch_market_quotes,
     fetch_treasury_quotes,
     fetch_yahoo_quote,
@@ -121,3 +123,58 @@ def test_treasury_parses_latest_two_observations(monkeypatch, settings):
     quotes = fetch_treasury_quotes(settings)
     assert quotes["us2y"].absolute_change == pytest.approx(0.05)
     assert round(quotes["us10y"].absolute_change * 100, 1) == 10.0
+
+
+def test_btc_intraday_falls_back_to_fifteen_minutes(monkeypatch, settings):
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    calls = []
+
+    def fake_intraday(_settings, *, interval):
+        from jin_market_pulse.models import PricePoint, PriceSeries
+
+        calls.append(interval)
+        count = 10 if interval == "5m" else 24
+        return PriceSeries(
+            key="btc",
+            name="BTC",
+            source="Yahoo Finance",
+            points=[
+                PricePoint(
+                    timestamp=datetime.fromtimestamp(timestamp + index * 300, timezone.utc),
+                    value=100000 + index,
+                )
+                for index in range(count)
+            ],
+        )
+
+    monkeypatch.setattr(
+        "jin_market_pulse.providers._fetch_yahoo_intraday",
+        fake_intraday,
+    )
+
+    series = fetch_btc_intraday_series(settings)
+
+    assert calls == ["5m", "15m"]
+    assert len(series.points) == 24
+
+
+def test_btc_quote_uses_same_twenty_four_hour_series_as_chart():
+    from jin_market_pulse.models import PricePoint, PriceSeries
+
+    now = datetime.now(timezone.utc)
+    series = PriceSeries(
+        key="btc",
+        name="BTC",
+        source="Yahoo Finance",
+        points=[
+            PricePoint(timestamp=now - timedelta(hours=24), value=100000),
+            PricePoint(timestamp=now, value=97000),
+        ],
+    )
+
+    quote = btc_quote_from_series(series)
+
+    assert quote.current == 97000
+    assert quote.previous == 100000
+    assert quote.percent_change == -3
+    assert quote.comparison_label == "24시간 전"

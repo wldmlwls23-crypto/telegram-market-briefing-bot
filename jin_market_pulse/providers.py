@@ -10,7 +10,7 @@ from urllib.parse import quote as url_quote
 import requests
 
 from .config import KST, Settings
-from .models import AssetQuote
+from .models import AssetQuote, PricePoint, PriceSeries
 
 
 UTC = timezone.utc
@@ -176,6 +176,76 @@ def fetch_yahoo_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
         if not quote.stale:
             result[key] = quote
     return result
+
+
+def _fetch_yahoo_intraday(
+    settings: Settings,
+    *,
+    interval: str,
+) -> PriceSeries:
+    response = _session().get(
+        YAHOO_CHART_URL.format(symbol="BTC-USD"),
+        params={"range": "2d", "interval": interval, "includePrePost": "true"},
+        timeout=settings.request_timeout_seconds,
+    )
+    response.raise_for_status()
+    result = response.json()["chart"]["result"][0]
+    timestamps = result.get("timestamp") or []
+    closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    points = [
+        PricePoint(
+            timestamp=datetime.fromtimestamp(int(timestamp), UTC),
+            value=float(value),
+        )
+        for timestamp, value in zip(timestamps, closes)
+        if value is not None
+    ]
+    if points:
+        cutoff = points[-1].timestamp - timedelta(hours=24)
+        points = [point for point in points if point.timestamp >= cutoff]
+    return PriceSeries(
+        key="btc",
+        name="BTC",
+        points=points,
+        source="Yahoo Finance",
+    )
+
+
+def fetch_btc_intraday_series(settings: Settings) -> PriceSeries:
+    errors: list[str] = []
+    for interval in ("5m", "15m"):
+        try:
+            series = _fetch_yahoo_intraday(settings, interval=interval)
+            if len(series.points) >= 20:
+                return series
+            errors.append(f"{interval}: {len(series.points)} valid points")
+        except Exception as exc:
+            errors.append(f"{interval}: {exc}")
+    raise RuntimeError("BTC intraday series unavailable: " + "; ".join(errors))
+
+
+def btc_quote_from_series(series: PriceSeries) -> AssetQuote:
+    if len(series.points) < 2:
+        raise ValueError("BTC quote requires at least two price points")
+    previous = series.points[0].value
+    current = series.points[-1].value
+    absolute, percent = _changes(current, previous)
+    as_of = series.points[-1].timestamp
+    return AssetQuote(
+        key="btc",
+        name_ko="BTC",
+        kind="crypto",
+        current=current,
+        previous=previous,
+        absolute_change=absolute,
+        percent_change=percent,
+        as_of=as_of,
+        market_state="OPEN",
+        source=series.source,
+        comparison_label="24시간 전",
+        stale=_is_stale(as_of, "crypto", "OPEN"),
+        unit="USD",
+    )
 
 
 def fetch_fmp_quote(

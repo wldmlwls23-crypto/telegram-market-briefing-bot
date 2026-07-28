@@ -30,3 +30,14 @@ def test_reaction_uses_before_to_after_values(market_data):
     lines = _reaction_lines(before, market_data.quotes)
     assert any("100,000.00" in line and "-3.00%" in line for line in lines)
     assert any("+10.0bp" in line for line in lines)
+
+
+def test_telegram_update_claim_is_persistent_and_reversible(tmp_path):
+    path = tmp_path / "state.json"
+    first = StateStore(path)
+    assert first.claim_telegram_update(101)
+    assert not StateStore(path).claim_telegram_update(101)
+
+    first.forget_telegram_update(101)
+
+    assert StateStore(path).claim_telegram_update(101)

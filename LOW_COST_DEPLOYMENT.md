@@ -26,10 +26,14 @@ OPENAI_REASONING_EFFORT=low
 OPENAI_MAX_OUTPUT_TOKENS=2500
 OPENAI_WEB_SEARCH=true
 CRON_SECRET=길고 무작위인 비밀값
+TELEGRAM_WEBHOOK_SECRET=CRON_SECRET과 다른 긴 무작위 값
 ```
 
 기존 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `OPENAI_API_KEY`는 그대로
 Railway Variables에만 보관합니다. Volume의 Mount Path는 `/data`를 유지합니다.
+
+Telegram 숫자 조회는 웹훅 요청이 들어올 때만 서비스를 깨우고 OpenAI를 호출하지
+않습니다. 장시간 실행되는 polling worker를 추가하지 않습니다.
 
 ## GitHub Actions secrets
 

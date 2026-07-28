@@ -45,3 +45,62 @@ def test_health_does_not_expose_configuration(settings):
         "service": "jin-market-pulse",
         "mode": "serverless",
     }
+
+
+def test_telegram_webhook_checks_secret_chat_and_duplicate(
+    settings,
+    monkeypatch,
+):
+    answers = []
+    monkeypatch.setattr(
+        "jin_market_pulse.server.answer_market_query",
+        lambda text, _settings: f"<b>{text}</b>",
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.server.TelegramClient.send",
+        lambda self, text, parse_mode=None: answers.append((text, parse_mode)),
+    )
+    client = TestClient(create_app(settings))
+    payload = {
+        "update_id": 7001,
+        "message": {
+            "chat": {"id": settings.telegram_chat_id},
+            "text": "비트 얼마야",
+        },
+    }
+
+    assert client.post("/telegram/webhook", json=payload).status_code == 401
+    response = client.post(
+        "/telegram/webhook",
+        json=payload,
+        headers={
+            "X-Telegram-Bot-Api-Secret-Token": settings.telegram_webhook_secret
+        },
+    )
+    duplicate = client.post(
+        "/telegram/webhook",
+        json=payload,
+        headers={
+            "X-Telegram-Bot-Api-Secret-Token": settings.telegram_webhook_secret
+        },
+    )
+
+    assert response.json() == {"status": "sent"}
+    assert duplicate.json() == {"status": "duplicate"}
+    assert answers == [("<b>비트 얼마야</b>", "HTML")]
+
+
+def test_telegram_webhook_ignores_other_chat(settings):
+    client = TestClient(create_app(settings))
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "update_id": 8001,
+            "message": {"chat": {"id": "not-allowed"}, "text": "/markets"},
+        },
+        headers={
+            "X-Telegram-Bot-Api-Secret-Token": settings.telegram_webhook_secret
+        },
+    )
+
+    assert response.json() == {"status": "ignored"}

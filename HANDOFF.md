@@ -1,4 +1,4 @@
-# JIN Market Pulse v2 인수인계
+# JIN Market Pulse v2.1 인수인계
 
 최종 업데이트: 2026-07-28
 
@@ -20,6 +20,8 @@
 - `jin_market_pulse/calendar.py`: 경제일정 필터
 - `jin_market_pulse/news.py`: 뉴스 출처와 중복 필터
 - `jin_market_pulse/reports.py`: OpenAI 구조화 분석과 텔레그램 리포트 렌더링
+- `jin_market_pulse/chart.py`: BTC 24시간 PNG 차트
+- `jin_market_pulse/bot_queries.py`: Telegram 숫자 조회
 - `jin_market_pulse/alerts.py`: 사전 알림, 결과 업데이트, 긴급 알림
 - `jin_market_pulse/state.py`: Railway Volume 상태 저장
 - `tests`: 자동 테스트
@@ -37,6 +39,6 @@ D:\Codex\JIN-Market-Pulse의 PROJECT_STATUS.md와 README.md를 먼저 읽어줘.
 먼저 pytest와 공개 API smoke test 결과를 확인한 뒤 작업해줘.
 ```
 
-## v2.1 예정
+## 다음 단계
 
-실제 모닝 리포트를 최소 이틀 검증한 뒤 한국, 유럽, 미국 장 전후 리포트를 순차 활성화합니다.
+v2.1 모닝 리포트를 최소 이틀 검증한 뒤 한국, 유럽, 미국 장 전후 리포트를 순차 활성화합니다.
