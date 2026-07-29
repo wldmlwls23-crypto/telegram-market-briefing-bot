@@ -34,7 +34,7 @@ def test_router_does_not_mistake_jigeum_or_rate_for_gold():
     assert route_query("금 가격 얼마야").asset_keys == ["gold"]
 
 
-def test_start_returns_non_persistent_inline_actions(settings, tmp_path):
+def test_start_returns_collapsible_mobile_keyboard(settings, tmp_path):
     response = handle_market_query(
         "/start",
         settings,
@@ -42,9 +42,21 @@ def test_start_returns_non_persistent_inline_actions(settings, tmp_path):
     )
 
     assert response.reply_markup == MAIN_KEYBOARD
-    assert "keyboard" not in response.reply_markup
-    assert "inline_keyboard" in response.reply_markup
+    assert response.reply_markup["one_time_keyboard"] is True
+    assert response.reply_markup["is_persistent"] is False
     assert "현재 시장" in str(response.reply_markup)
+
+
+def test_menu_reopens_collapsible_mobile_keyboard(settings, tmp_path):
+    response = handle_market_query(
+        "/menu",
+        settings,
+        StateStore(tmp_path / "state.json"),
+    )
+
+    assert route_query("/menu").intent == "menu"
+    assert response.reply_markup == MAIN_KEYBOARD
+    assert "자동으로 접힙니다" in response.text
 
 
 def test_reset_only_clears_conversation_context(settings, tmp_path):

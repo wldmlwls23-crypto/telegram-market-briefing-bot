@@ -17,26 +17,22 @@ SAFE_PART_LIMIT = 3800
 MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 
 MAIN_KEYBOARD = {
-    "inline_keyboard": [
-        [
-            {"text": "현재 시장", "callback_data": "cmd:markets"},
-            {"text": "오늘 일정", "callback_data": "cmd:calendar"},
-        ],
-        [
-            {"text": "이번 주", "callback_data": "cmd:week"},
-            {"text": "왜 움직여?", "callback_data": "cmd:cause"},
-        ],
-        [
-            {"text": "최근 리포트", "callback_data": "cmd:last"},
-            {"text": "상태", "callback_data": "cmd:status"},
-        ],
+    "keyboard": [
+        [{"text": "현재 시장"}, {"text": "오늘 일정"}],
+        [{"text": "이번 주"}, {"text": "왜 움직여?"}],
+        [{"text": "최근 리포트"}, {"text": "상태"}],
     ],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
+    "is_persistent": False,
+    "input_field_placeholder": "시장 질문을 입력하세요",
 }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 BOT_COMMANDS = [
     {"command": "start", "description": "처음 화면과 빠른 버튼"},
+    {"command": "menu", "description": "빠른 버튼 열기"},
     {"command": "brief", "description": "모닝 리포트 다시 보기"},
     {"command": "price", "description": "자산 가격 조회"},
     {"command": "compare", "description": "두 자산 변동 비교"},

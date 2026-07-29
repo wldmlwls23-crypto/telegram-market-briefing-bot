@@ -29,6 +29,7 @@ from .telegram import MAIN_KEYBOARD, REMOVE_KEYBOARD
 
 Intent = Literal[
     "start",
+    "menu",
     "help",
     "brief",
     "last",
@@ -239,6 +240,7 @@ def route_query(text: str, context: dict[str, Any] | None = None) -> RouteResult
 
     command_intents: dict[str, Intent] = {
         "/start": "start",
+        "/menu": "menu",
         "/help": "help",
         "/brief": "brief",
         "/last": "last",
@@ -265,6 +267,8 @@ def route_query(text: str, context: dict[str, Any] | None = None) -> RouteResult
 
     if normalized in {"현재 시장", "전체 시장", "전체 시세"}:
         return RouteResult("markets", assets, period)
+    if normalized in {"메뉴", "메뉴 열기", "버튼 열기"}:
+        return RouteResult("menu", assets, period)
     if normalized in {"오늘 일정", "일정"}:
         return RouteResult("calendar", assets, "today")
     if normalized in {"이번 주", "이번주"}:
@@ -540,6 +544,7 @@ def _help() -> str:
     return "\n".join(
         [
             "<b>JIN Market Pulse 사용법</b>",
+            "빠른 버튼은 /menu로 열 수 있으며 한 번 사용하면 자동으로 접힙니다.",
             "",
             "<b>가격</b>",
             "• 이더 얼마야",
@@ -1075,6 +1080,11 @@ def handle_market_query(
         return _candidate_response(route.candidates)
     if route.intent == "start":
         return BotResponse(_start(), MAIN_KEYBOARD)
+    if route.intent == "menu":
+        return BotResponse(
+            "빠른 버튼을 열었습니다. 한 번 사용하면 자동으로 접힙니다.",
+            MAIN_KEYBOARD,
+        )
     if route.intent == "help":
         return BotResponse(_help(), MAIN_KEYBOARD)
     if route.intent == "brief":

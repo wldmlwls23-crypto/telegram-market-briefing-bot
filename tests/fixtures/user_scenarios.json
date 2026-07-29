@@ -148,5 +148,6 @@
   {"id": 147, "text": "현재 시장 버튼", "intent": "unknown"},
   {"id": 148, "text": "이거 왜 이래", "intent": "follow_up", "context": {"asset_key": "kospi"}},
   {"id": 149, "text": "뭘 물어봐", "intent": "help"},
-  {"id": 150, "text": "안녕하세요", "intent": "unknown"}
+  {"id": 150, "text": "안녕하세요", "intent": "unknown"},
+  {"id": 151, "text": "/menu", "intent": "menu"}
 ]

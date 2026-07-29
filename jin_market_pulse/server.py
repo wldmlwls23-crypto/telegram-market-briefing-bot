@@ -102,7 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             parse_mode="HTML",
                             reply_markup=candidate.reply_markup,
                         )
-                    elif route.intent in {"start", "help"}:
+                    elif route.intent in {"start", "menu", "help"}:
                         telegram.send(
                             answer,
                             parse_mode="HTML",
