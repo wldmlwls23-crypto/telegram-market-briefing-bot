@@ -12,11 +12,13 @@ from .app import MarketPulseApp, setup_logging
 from .bot_queries import (
     _candidate_response,
     answer_market_query,
+    handle_market_query,
     route_query,
 )
 from .config import Settings
 from .jobs import process_telegram_update, run_tick
 from .links import first_https_url
+from .session_reports import REPORT_TYPES, send_session_report
 from .state import StateStore
 from .telegram import MAIN_KEYBOARD, TelegramClient
 
@@ -45,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     morning_lock = Lock()
     tick_lock = Lock()
+    report_lock = Lock()
 
     def current_settings() -> Settings:
         return settings or Settings.from_env(require_secrets=True)
@@ -78,10 +81,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         text,
                         store.get_chat_context(job_settings.telegram_chat_id),
                     )
-                    answer = answer_market_query(
-                        text,
-                        job_settings,
-                        store,
+                    response = (
+                        handle_market_query(text, job_settings, store)
+                        if route.intent == "last"
+                        else None
+                    )
+                    answer = (
+                        response.text
+                        if response
+                        else answer_market_query(
+                            text,
+                            job_settings,
+                            store,
+                        )
                     )
                     if route.candidates:
                         candidate = _candidate_response(route.candidates)
@@ -95,6 +107,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             answer,
                             parse_mode="HTML",
                             reply_markup=MAIN_KEYBOARD,
+                        )
+                    elif response:
+                        telegram.send(
+                            answer,
+                            parse_mode=response.parse_mode,
+                            reply_markup=response.reply_markup,
                         )
                     else:
                         telegram.send(answer, parse_mode="HTML")
@@ -199,6 +217,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) from None
         finally:
             tick_lock.release()
+
+    @api.post("/jobs/report/{report_type}")
+    async def report_job(
+        report_type: str,
+        deliver: bool = False,
+        authorization: str | None = Header(default=None),
+        x_idempotency_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        job_settings = current_settings()
+        if not _authorized(authorization, job_settings.cron_secret):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+        if report_type not in REPORT_TYPES | {"morning"}:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Unknown report type",
+            )
+        if deliver and (not x_idempotency_key or len(x_idempotency_key) < 8):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delivery requires X-Idempotency-Key",
+            )
+        if not report_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Report job is already running",
+            )
+        try:
+            if report_type == "morning":
+                market_app = MarketPulseApp(job_settings)
+                if deliver:
+                    result = await run_in_threadpool(
+                        lambda: market_app.send_morning_report(
+                            idempotency_key=str(x_idempotency_key)[:100]
+                        )
+                    )
+                    return {"status": result, "report_type": report_type}
+                text = await run_in_threadpool(market_app.preview_morning_report)
+                return {
+                    "status": "preview",
+                    "report_type": report_type,
+                    "characters": len(text),
+                    "text": text,
+                }
+            store = state_for(job_settings)
+            telegram = TelegramClient(job_settings)
+            result = await run_in_threadpool(
+                lambda: send_session_report(
+                    report_type,
+                    job_settings,
+                    store,
+                    telegram,
+                    deliver=deliver,
+                    idempotency_key=(
+                        str(x_idempotency_key)[:100]
+                        if x_idempotency_key
+                        else None
+                    ),
+                )
+            )
+            return {
+                "status": result.status,
+                "report_type": report_type,
+                "characters": len(result.text),
+                "skip_reason": result.skip_reason,
+                "text": result.text if not deliver else "",
+            }
+        except Exception:
+            logging.exception("Manual report job failed: %s", report_type)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Report job failed",
+            ) from None
+        finally:
+            report_lock.release()
 
     @api.post("/telegram/webhook")
     async def telegram_webhook(

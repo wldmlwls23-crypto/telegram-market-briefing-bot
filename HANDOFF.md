@@ -1,4 +1,4 @@
-# JIN Market Pulse v2.2 인수인계
+# JIN Market Pulse v2.3 인수인계
 
 최종 업데이트: 2026-07-29
 
@@ -25,7 +25,9 @@
 - `bot_queries.py`: 결정형 한국어 라우터와 답변
 - `advisor.py`: 내장 용어, 구조화 현재 원인, 이미지·음성
 - `alerts.py`: 5성 지표·긴급 뉴스
-- `jobs.py`: 30분 tick, Telegram 작업함, 개인 알림
+- `breaking.py`: 15분 뉴스·30분 급변, 출처 검증과 후속 수정
+- `session_reports.py`: 한국·유럽 장 마감과 사실 키 중복 제거
+- `jobs.py`: 15분 tick, Telegram 작업함, 개인 알림
 - `state.py`: SQLite WAL과 JSON 안전 이전
 - `server.py`: `/health`, `/ready`, jobs, Telegram 웹훅
 - `telegram.py`: 전송·수정·버튼·명령·파일 API
@@ -42,7 +44,7 @@
 ## 이어서 작업할 때
 
 ```text
-JIN Market Pulse v2.2 작업을 D:\Codex\JIN-Market-Pulse에서 이어가줘.
+JIN Market Pulse v2.3 작업을 D:\Codex\JIN-Market-Pulse에서 이어가줘.
 PROJECT_STATUS.md와 README.md를 먼저 읽고, 비밀값은 출력하지 마.
 로컬 전체 테스트와 실공급원 smoke, GitHub CI, Railway 배포 상태를 각각 검증해줘.
 ```

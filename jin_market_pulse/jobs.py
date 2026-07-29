@@ -13,10 +13,12 @@ from .alerts import (
     send_due_pre_event_reminders,
 )
 from .app import MarketPulseApp
+from .breaking import monitor_breaking_alerts
 from .bot_queries import ASSET_DEFINITIONS, handle_market_query
 from .config import KST, Settings
 from .links import explain_news_link, first_https_url
 from .providers import fetch_asset_quote, fetch_market_quotes
+from .session_reports import report_due, send_session_report
 from .state import StateStore
 from .telegram import MAIN_KEYBOARD, TelegramClient
 
@@ -31,6 +33,8 @@ def _allowed_chat(payload: dict[str, Any], settings: Settings) -> bool:
 def _callback_text(data: str) -> str:
     if data.startswith("price:"):
         return f"/price {data.split(':', 1)[1]}"
+    if data.startswith("last:"):
+        return f"/last {data.split(':', 1)[1]}"
     mapping = {
         "cmd:markets": "/markets",
         "cmd:calendar": "/calendar",
@@ -335,7 +339,8 @@ def run_tick(
     state = StateStore(settings.state_db, legacy_json=settings.state_file)
     telegram = TelegramClient(settings)
     now = datetime.now(KST)
-    slot = idempotency_key or f"{now:%Y%m%d-%H}-{'00' if now.minute < 30 else '30'}"
+    quarter = (now.minute // 15) * 15
+    slot = idempotency_key or f"{now:%Y%m%d-%H}-{quarter:02d}"
     job_key = f"tick:{slot}"
     if not state.claim_job(job_key, lease_seconds=90):
         return {"status": "duplicate", "slot": slot}
@@ -348,6 +353,7 @@ def run_tick(
         )
         prefs = state.preferences(settings.telegram_chat_id)
         muted = state.is_muted(settings.telegram_chat_id)
+        check_prices = 18 <= now.minute <= 27 or 48 <= now.minute <= 57
 
         if (
             "morning" in settings.enabled_reports
@@ -355,6 +361,25 @@ def run_tick(
             and 45 <= now.minute <= 59
         ):
             result["morning"] = MarketPulseApp(settings).send_morning_report()
+
+        for report_type, preference in (
+            ("korea_close", "korea_close_reports"),
+            ("europe_close", "europe_close_reports"),
+        ):
+            if (
+                report_type in settings.enabled_reports
+                and prefs.get(preference, True)
+                and not muted
+                and report_due(report_type, now)
+            ):
+                report = send_session_report(
+                    report_type,
+                    settings,
+                    state,
+                    telegram,
+                    deliver=True,
+                )
+                result[report_type] = report.status
 
         if settings.enable_event_alerts and prefs["event_alerts"] and not muted:
             send_due_pre_event_reminders(settings, state, telegram)
@@ -366,9 +391,22 @@ def run_tick(
             and prefs["emergency_alerts"]
             and not muted
         ):
-            monitor_emergency_alerts(settings, state, telegram)
+            result["breaking"] = monitor_breaking_alerts(
+                settings,
+                state,
+                telegram,
+                check_prices=check_prices,
+                disable_notification=bool(
+                    prefs.get("overnight_silent", True)
+                    and 0 <= now.hour < 6
+                ),
+            )
 
-        result["price_alerts"] = check_price_alerts(settings, state, telegram)
+        result["price_alerts"] = (
+            check_price_alerts(settings, state, telegram)
+            if check_prices
+            else 0
+        )
         report_provider_health(state, telegram)
         state.finish_job(job_key, success=True)
         return result
@@ -379,4 +417,3 @@ def run_tick(
             error=type(exc).__name__,
         )
         raise
-

@@ -103,6 +103,47 @@ HARD_SHOCK_TERMS = {
     "해킹",
 }
 
+BREAKING_EVENT_TERMS = {
+    "rate decision",
+    "rate cut",
+    "rate hike",
+    "tariff",
+    "sanction",
+    "cpi",
+    "pce",
+    "payroll",
+    "unemployment",
+    "war",
+    "attack",
+    "invasion",
+    "bank failure",
+    "liquidity crisis",
+    "circuit breaker",
+    "depeg",
+    "exchange hack",
+    "withdrawals suspended",
+    "semiconductor export",
+    "chip export",
+    "earnings warning",
+    "opec",
+    "supply disruption",
+    "긴급 금리",
+    "관세",
+    "제재",
+    "물가",
+    "고용",
+    "전쟁",
+    "공격",
+    "은행 파산",
+    "유동성 위기",
+    "서킷브레이커",
+    "디페그",
+    "거래소 해킹",
+    "출금 중단",
+    "반도체 수출",
+    "공급 차질",
+}
+
 ASSET_TERMS = {
     "btc": {"bitcoin", "btc", "비트코인"},
     "eth": {"ethereum", "eth", "이더리움"},
@@ -115,6 +156,7 @@ ASSET_TERMS = {
     "wti": {"oil", "crude", "wti", "유가", "원유"},
     "gold": {"gold", "금값"},
     "usdkrw": {"won", "usd/krw", "원달러", "원화"},
+    "nasdaq_futures": {"nasdaq futures", "nq futures", "나스닥 선물"},
 }
 
 
@@ -278,6 +320,34 @@ def emergency_groups(news: list[NewsItem]) -> list[list[NewsItem]]:
         candidates,
         key=lambda items: max(
             (item.published_at or datetime.min.replace(tzinfo=UTC))
+            for item in items
+        ),
+        reverse=True,
+    )
+
+
+def breaking_groups(news: list[NewsItem]) -> list[list[NewsItem]]:
+    grouped: dict[str, list[NewsItem]] = defaultdict(list)
+    for item in news:
+        grouped[item.topic_key].append(item)
+    candidates: list[list[NewsItem]] = []
+    for items in grouped.values():
+        text = _normalized(
+            " ".join(f"{item.title} {item.summary}" for item in items)
+        )
+        if not any(
+            term in text for term in BREAKING_EVENT_TERMS | HARD_SHOCK_TERMS
+        ):
+            continue
+        publishers = {item.publisher.lower() for item in items}
+        official = any(item.official_source for item in items)
+        primary = any(item.source_tier == 1 for item in items)
+        if official or primary or len(publishers) >= 2:
+            candidates.append(items)
+    return sorted(
+        candidates,
+        key=lambda items: max(
+            item.published_at or datetime.min.replace(tzinfo=UTC)
             for item in items
         ),
         reverse=True,

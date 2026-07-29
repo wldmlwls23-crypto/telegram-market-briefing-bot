@@ -22,6 +22,7 @@ from .providers import (
     fetch_market_quotes,
 )
 from .reports import format_quote
+from .session_reports import next_report_time
 from .state import StateStore
 from .telegram import MAIN_KEYBOARD
 
@@ -304,9 +305,16 @@ def route_query(text: str, context: dict[str, Any] | None = None) -> RouteResult
     ):
         return RouteResult("alerts", assets, period)
     if (
-        any(kind in normalized for kind in {"긴급", "경제", "지표"})
+        any(
+            kind in normalized
+            for kind in {"긴급", "경제", "지표", "한국 마감", "한국장", "유럽", "새벽"}
+        )
         and "알림" in normalized
         and any(term in normalized for term in {"꺼", "켜"})
+    ):
+        return RouteResult("settings", assets, period)
+    if "새벽" in normalized and any(
+        term in normalized for term in {"무음", "소리", "켜", "꺼", "해제"}
     ):
         return RouteResult("settings", assets, period)
     if "조용히" in normalized or (
@@ -872,15 +880,34 @@ def _settings(text: str, settings: Settings, store: StateStore | None) -> str:
         values["event_alerts"] = False
     elif "경제" in normalized and "켜" in normalized:
         values["event_alerts"] = True
+    if any(term in normalized for term in {"한국 마감", "한국장"}):
+        if "꺼" in normalized:
+            values["korea_close_reports"] = False
+        elif "켜" in normalized:
+            values["korea_close_reports"] = True
+    if "유럽" in normalized and "마감" in normalized:
+        if "꺼" in normalized:
+            values["europe_close_reports"] = False
+        elif "켜" in normalized:
+            values["europe_close_reports"] = True
+    if "새벽" in normalized:
+        if any(term in normalized for term in {"꺼", "해제", "소리"}):
+            values["overnight_silent"] = False
+        elif any(term in normalized for term in {"켜", "무음", "조용"}):
+            values["overnight_silent"] = True
     prefs = store.update_preferences(settings.telegram_chat_id, **values) if values else store.preferences(settings.telegram_chat_id)
     return "\n".join(
         [
             "<b>알림 설정</b>",
             f"경제지표: {'켜짐' if prefs['event_alerts'] else '꺼짐'}",
             f"긴급 뉴스: {'켜짐' if prefs['emergency_alerts'] else '꺼짐'}",
+            f"한국장 마감: {'켜짐' if prefs['korea_close_reports'] else '꺼짐'}",
+            f"유럽장 마감: {'켜짐·무음' if prefs['europe_close_reports'] else '꺼짐'}",
+            f"새벽 속보 무음: {'켜짐' if prefs['overnight_silent'] else '꺼짐'}",
             f"일시 정지: {'켜짐' if store.is_muted(settings.telegram_chat_id) else '꺼짐'}",
             "",
-            "예: <i>긴급 알림 꺼줘</i> · <i>경제 알림 켜줘</i> · <i>8시간 조용히</i>",
+            "예: <i>한국 마감 알림 꺼줘</i> · <i>유럽 마감 알림 켜줘</i>",
+            "<i>긴급 알림 꺼줘</i> · <i>새벽 무음 켜줘</i> · <i>8시간 조용히</i>",
         ]
     )
 
@@ -893,7 +920,11 @@ def _status(settings: Settings, store: StateStore | None) -> str:
     lines = [
         "<b>JIN Market Pulse 상태</b>",
         f"다음 모닝: {next_morning:%m/%d %H:%M} KST",
-        "모닝 외 정기 리포트: 없음",
+        f"다음 한국장 마감: {next_report_time('korea_close', now):%m/%d %H:%M} KST",
+        (
+            "다음 유럽장 마감: "
+            f"{next_report_time('europe_close', now).astimezone(KST):%m/%d %H:%M} KST · 무음"
+        ),
     ]
     if store is None:
         lines.append("상태 저장소: 연결 안 됨")
@@ -902,6 +933,20 @@ def _status(settings: Settings, store: StateStore | None) -> str:
     if latest:
         created = datetime.fromisoformat(latest["created_at"]).astimezone(KST)
         lines.append(f"마지막 모닝: {created:%m/%d %H:%M} KST")
+    for report_type, label in (
+        ("korea_close", "한국장 마감"),
+        ("europe_close", "유럽장 마감"),
+    ):
+        report = store.latest_report_run(report_type)
+        if not report:
+            continue
+        updated = datetime.fromisoformat(report["updated_at"]).astimezone(KST)
+        if report["status"] == "skipped":
+            lines.append(
+                f"최근 {label}: 건너뜀 · {html.escape(str(report['skip_reason']))}"
+            )
+        else:
+            lines.append(f"최근 {label}: {updated:%m/%d %H:%M} KST")
     snapshot = store.latest_market_snapshot()
     if snapshot:
         captured = datetime.fromisoformat(snapshot["captured_at"]).astimezone(KST)
@@ -910,7 +955,9 @@ def _status(settings: Settings, store: StateStore | None) -> str:
     lines.extend(
         [
             f"경제지표 알림: {'켜짐' if prefs['event_alerts'] else '꺼짐'}",
-            f"긴급 뉴스 알림: {'켜짐' if prefs['emergency_alerts'] else '꺼짐'}",
+            f"긴급 속보: {'켜짐' if prefs['emergency_alerts'] else '꺼짐'}",
+            f"한국장 마감: {'켜짐' if prefs['korea_close_reports'] else '꺼짐'}",
+            f"유럽장 마감: {'켜짐·무음' if prefs['europe_close_reports'] else '꺼짐'}",
             f"가격 알림: {len(store.list_price_alerts(settings.telegram_chat_id))}개",
         ]
     )
@@ -923,6 +970,10 @@ def _status(settings: Settings, store: StateStore | None) -> str:
         if int(item["consecutive_failures"]) >= 3
     ]
     lines.append(f"데이터 공급원: {'일부 장애' if unhealthy else '정상'}")
+    scan = store.runtime_state("breaking_scan")
+    if scan.get("checked_at"):
+        checked = datetime.fromisoformat(scan["checked_at"]).astimezone(KST)
+        lines.append(f"마지막 속보 검사: {checked:%m/%d %H:%M} KST")
     return "\n".join(lines)
 
 
@@ -933,11 +984,37 @@ def _brief(store: StateStore | None) -> str:
     return saved["text"] if saved else "저장된 모닝 리포트가 없습니다."
 
 
-def _last(store: StateStore | None) -> str:
+def _last(store: StateStore | None, report_type: str = "") -> str:
     if store is None:
         return "저장된 최근 메시지가 없습니다."
+    if report_type in {"morning", "korea_close", "europe_close"}:
+        saved = store.latest_saved_message(f"{report_type}:")
+        return saved["text"] if saved else "해당 리포트가 아직 저장되지 않았습니다."
     saved = store.latest_saved_message("")
     return saved["text"] if saved else "저장된 최근 메시지가 없습니다."
+
+
+def _last_response(text: str, store: StateStore | None) -> BotResponse:
+    normalized = _normalized(text)
+    report_type = ""
+    if "korea_close" in normalized or "한국" in normalized:
+        report_type = "korea_close"
+    elif "europe_close" in normalized or "유럽" in normalized:
+        report_type = "europe_close"
+    elif "morning" in normalized or "모닝" in normalized:
+        report_type = "morning"
+    return BotResponse(
+        _last(store, report_type),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "모닝", "callback_data": "last:morning"},
+                    {"text": "한국 마감", "callback_data": "last:korea_close"},
+                    {"text": "유럽 마감", "callback_data": "last:europe_close"},
+                ]
+            ]
+        },
+    )
 
 
 def _candidate_response(candidates: list[str]) -> BotResponse:
@@ -1003,7 +1080,7 @@ def handle_market_query(
     if route.intent == "brief":
         return BotResponse(_brief(store), MAIN_KEYBOARD)
     if route.intent == "last":
-        return BotResponse(_last(store), MAIN_KEYBOARD)
+        return _last_response(text, store)
     if route.intent == "status":
         return BotResponse(_status(settings, store), MAIN_KEYBOARD)
     if route.intent == "settings":

@@ -54,6 +54,8 @@ class Settings:
     data_contact_email: str = "personal-use@example.com"
     port: int = 8000
     openai_max_output_tokens: int = 2500
+    breaking_alert_mode: str = "balanced"
+    auto_ai_daily_limit: int = 6
 
     @property
     def state_file(self) -> Path:
@@ -113,4 +115,8 @@ class Settings:
             openai_max_output_tokens=int(
                 os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2500")
             ),
+            breaking_alert_mode=os.getenv(
+                "BREAKING_ALERT_MODE", "balanced"
+            ).strip().lower(),
+            auto_ai_daily_limit=int(os.getenv("AUTO_AI_DAILY_LIMIT", "6")),
         )

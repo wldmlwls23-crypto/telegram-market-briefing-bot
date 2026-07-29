@@ -11,13 +11,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .alerts import (
     capture_due_event_baselines,
-    monitor_emergency_alerts,
     send_due_event_results,
     send_due_pre_event_reminders,
 )
+from .breaking import monitor_breaking_alerts
 from .calendar import fetch_economic_events
 from .chart import render_btc_chart
-from .config import KST, Settings
+from .config import KST, PARIS, Settings
 from .models import MarketData
 from .news import fetch_news
 from .providers import (
@@ -33,6 +33,7 @@ from .reports import (
     render_morning_report,
 )
 from .state import StateStore
+from .session_reports import send_session_report
 from .telegram import TelegramClient
 
 
@@ -92,7 +93,12 @@ class MarketPulseApp:
             days_ahead=4,
             store=self.state,
         )
-        news = fetch_news()
+        recent_facts = self.state.recent_report_facts(hours=18)
+        news = [
+            item
+            for item in fetch_news()
+            if f"news:{item.topic_key}" not in recent_facts
+        ]
         btc_series = None
         try:
             btc_series = fetch_btc_intraday_series(self.settings)
@@ -155,21 +161,65 @@ class MarketPulseApp:
                     )
                 except Exception:
                     logging.exception("BTC chart send failed; continuing with text report.")
+            text_message_id = None
             if not self.state.delivery_sent(delivery_key, "text"):
                 message_ids = self.telegram.send(
                     report,
                     parse_mode="HTML",
                 )
+                text_message_id = message_ids[0] if message_ids else None
                 self.state.mark_delivery(
                     delivery_key,
                     "text",
-                    telegram_message_id=message_ids[0] if message_ids else None,
+                    telegram_message_id=text_message_id,
                     content_hash=hashlib.sha256(
                         report.encode("utf-8")
                     ).hexdigest(),
                 )
             self.state.add_market_snapshot(data.quotes)
             self.state.save_message(delivery_key, report, parse_mode="HTML")
+            report_facts = [
+                {
+                    "fact_key": f"asset:{key}",
+                    "numeric_value": quote.percent_change,
+                    "direction": (
+                        1
+                        if (quote.percent_change or 0) > 0
+                        else -1
+                        if (quote.percent_change or 0) < 0
+                        else 0
+                    ),
+                    "official": False,
+                }
+                for key, quote in data.quotes.items()
+                if quote.percent_change is not None
+            ]
+            report_facts.extend(
+                {
+                    "fact_key": f"news:{item.topic_key}",
+                    "numeric_value": None,
+                    "direction": 0,
+                    "official": item.official_source,
+                }
+                for signal in analysis.signals
+                if (item := next(
+                    (
+                        candidate
+                        for candidate in data.news
+                        if candidate.news_id == signal.candidate_id
+                    ),
+                    None,
+                ))
+            )
+            self.state.record_report_run(
+                delivery_key,
+                "morning",
+                datetime.now(KST).date().isoformat(),
+                "sent",
+                text=report,
+                facts=report_facts,
+                telegram_message_id=text_message_id,
+            )
             self.state.finish_job(delivery_key, success=True)
             logging.info("Morning Market Report sent successfully.")
             return "sent"
@@ -181,6 +231,18 @@ class MarketPulseApp:
             )
             logging.exception("Morning Market Report failed.")
             raise
+
+    def preview_morning_report(self) -> str:
+        data = self.collect_morning_data()
+        missing = critical_data_errors(data.quotes)
+        if missing:
+            return render_data_health_alert(missing, data.errors)
+        try:
+            analysis = create_morning_analysis(data, self.settings)
+        except Exception:
+            logging.exception("OpenAI morning preview failed; using data-only fallback.")
+            analysis = fallback_morning_analysis(data)
+        return render_morning_report(data, analysis)
 
     def run_guarded(self, name: str, callback: object) -> None:
         try:
@@ -195,6 +257,38 @@ class MarketPulseApp:
                 self.send_morning_report,
                 CronTrigger(hour=6, minute=50, timezone=KST),
                 id="report_morning",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300,
+            )
+        if "korea_close" in self.settings.enabled_reports:
+            scheduler.add_job(
+                lambda: send_session_report(
+                    "korea_close",
+                    self.settings,
+                    self.state,
+                    self.telegram,
+                    deliver=True,
+                ),
+                CronTrigger(hour=15, minute=50, timezone=KST),
+                id="report_korea_close",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300,
+            )
+        if "europe_close" in self.settings.enabled_reports:
+            scheduler.add_job(
+                lambda: send_session_report(
+                    "europe_close",
+                    self.settings,
+                    self.state,
+                    self.telegram,
+                    deliver=True,
+                ),
+                CronTrigger(hour=18, minute=5, timezone=PARIS),
+                id="report_europe_close",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
@@ -245,8 +339,20 @@ class MarketPulseApp:
             scheduler.add_job(
                 lambda: self.run_guarded(
                     "emergency_alerts",
-                    lambda: monitor_emergency_alerts(
-                        self.settings, self.state, self.telegram
+                    lambda: monitor_breaking_alerts(
+                        self.settings,
+                        self.state,
+                        self.telegram,
+                        check_prices=(
+                            18 <= datetime.now(KST).minute <= 27
+                            or 48 <= datetime.now(KST).minute <= 57
+                        ),
+                        disable_notification=bool(
+                            self.state.preferences(
+                                self.settings.telegram_chat_id
+                            ).get("overnight_silent", True)
+                            and datetime.now(KST).hour < 6
+                        ),
                     ),
                 ),
                 "interval",

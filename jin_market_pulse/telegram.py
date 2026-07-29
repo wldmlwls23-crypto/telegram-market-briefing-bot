@@ -130,6 +130,7 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         chat_id: str | None = None,
         reply_to_message_id: int | None = None,
+        disable_notification: bool = False,
     ) -> list[int]:
         parts = (
             split_html_message(text)
@@ -147,6 +148,7 @@ class TelegramClient:
                 "chat_id": chat_id or self.settings.telegram_chat_id,
                 "text": payload_text,
                 "disable_web_page_preview": True,
+                "disable_notification": disable_notification,
             }
             if parse_mode:
                 request_body["parse_mode"] = parse_mode

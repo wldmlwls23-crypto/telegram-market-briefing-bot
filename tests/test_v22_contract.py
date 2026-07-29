@@ -291,7 +291,7 @@ def test_railway_cron_has_bounded_schedule_and_runtime():
 
     assert config["build"]["builder"] == "RAILPACK"
     assert deploy["startCommand"] == "python -m jin_market_pulse.cron"
-    assert deploy["cronSchedule"] == "20,50 * * * *"
+    assert deploy["cronSchedule"] == "5,20,35,50 * * * *"
     assert deploy["sleepApplication"] is False
     assert deploy["restartPolicyType"] == "NEVER"
 

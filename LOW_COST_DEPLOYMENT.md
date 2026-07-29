@@ -3,8 +3,8 @@
 ## 목표 구조
 
 1. 웹 서비스는 Telegram 요청과 예약 호출이 있을 때만 깨어납니다.
-2. `market-pulse-cron`이 매시 UTC 20분과 50분에 `/jobs/tick`을 호출하고 종료합니다.
-3. tick은 모닝, 5성 지표, 긴급 뉴스, 개인 가격 알림과 미처리 웹훅을 한 번 점검합니다.
+2. `market-pulse-cron`이 매시 UTC 5·20·35·50분에 `/jobs/tick`을 호출하고 종료합니다.
+3. tick은 장 마감·모닝·5성 지표·속보·개인 가격 알림과 미처리 웹훅을 점검합니다.
 4. GitHub Actions는 매일 06:58 KST 모닝 백업만 담당합니다.
 
 웹 서비스는 Serverless, 1 Replica, 256MB, 0.25 vCPU, `/data` Volume을
@@ -28,7 +28,7 @@
 
 ```text
 Start Command: python -m jin_market_pulse.cron
-Cron Schedule: 20,50 * * * *
+Cron Schedule: 5,20,35,50 * * * *
 CRON_TARGET_URL=https://telegram-market-briefing-bot-production.up.railway.app
 CRON_SECRET=웹 서비스와 같은 값
 ```
@@ -46,7 +46,7 @@ Invoke-RestMethod `
   -Uri "$env:PUBLIC_BASE_URL/jobs/morning" `
   -Headers @{
     Authorization = "Bearer $env:CRON_SECRET"
-    "X-Idempotency-Key" = "manual-v22-test"
+    "X-Idempotency-Key" = "manual-v23-test"
   }
 ```
 

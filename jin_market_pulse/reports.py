@@ -399,6 +399,26 @@ def _market_summary(quotes: dict[str, AssetQuote]) -> tuple[str, str]:
     return first, second
 
 
+def _us_close_summary(quotes: dict[str, AssetQuote]) -> str:
+    parts: list[str] = []
+    for key, label in (
+        ("sp500", "S&P 500"),
+        ("nasdaq100", "Nasdaq 100"),
+        ("dow", "Dow"),
+    ):
+        quote = quotes.get(key)
+        if (
+            not quote
+            or quote.stale
+            or not quote.verified
+            or quote.percent_change is None
+        ):
+            continue
+        arrow = "▲" if quote.percent_change > 0 else "▼" if quote.percent_change < 0 else "▬"
+        parts.append(f"{label} {arrow}{abs(quote.percent_change):.2f}%")
+    return " · ".join(parts)
+
+
 def _news_by_id(news: list[NewsItem]) -> dict[str, NewsItem]:
     return {item.news_id: item for item in news}
 
@@ -430,12 +450,14 @@ def _render_report(
     news_map = _news_by_id(data.news)
     events = select_future_events(data)
     summary, relationship = _market_summary(data.quotes)
+    us_close = _us_close_summary(data.quotes)
     lines = [
         "<b>JIN Market Pulse</b>",
         data.generated_at_kst.strftime("%m/%d %H:%M KST"),
         "",
         "<b>한눈에</b>",
         html.escape(summary),
+        *([f"미국장 마감: {html.escape(us_close)}"] if us_close else []),
         "",
         REQUIRED_HEADINGS[0],
     ]

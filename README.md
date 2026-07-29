@@ -1,4 +1,4 @@
-# JIN Market Pulse v2.2
+# JIN Market Pulse v2.3
 
 한국인 개인 사용자가 Telegram 하나에서 아침 시장 파악, 실시간 가격 조회,
 경제일정, 움직임의 배경, 개인 가격 알림을 처리하는 서버리스 봇입니다.
@@ -8,12 +8,14 @@
 
 ## 자동으로 오는 메시지
 
-- 매일 `06:50 KST`: BTC 24시간 차트 1장과 2,000자 이하 모닝 리포트
+- 매일 `06:50 KST`: 미국장 마감을 포함한 BTC 차트와 모닝 리포트
+- 한국 거래일 `15:50 KST`: 한국장 마감 리포트
+- 유럽 거래일 `18:05 Europe/Paris`: 유럽장 마감 리포트(무음)
 - 중요도 5성 지표: 60~90분 전 사전 알림과 실제 발표 후 결과·시장 반응
-- 긴급 뉴스: 공식 출처 1곳 또는 독립 매체 2곳과 유의미한 자산 움직임이 모두 확인될 때
+- 긴급 속보: 15분마다 검증 뉴스, 30분마다 가격 급변을 확인해 새 사실만 갱신
 - 개인 가격 알림: 사용자가 직접 만든 조건을 30분마다 점검
 
-한국·유럽·미국 세션별 정기 리포트는 보내지 않습니다. 필요할 때 질문으로 조회합니다.
+미국장 마감은 별도 반복 발송하지 않고 모닝 리포트 첫 부분에 통합합니다.
 
 ## 질문 예시
 
@@ -80,6 +82,7 @@ DXY가 뭐야?
 저장 대상:
 
 - 모닝 리포트 차트·텍스트 단계
+- 한국·유럽 장 마감 사실 키, 발송 상태와 건너뛴 사유
 - 경제지표 사전값·결과·정정
 - 뉴스 사건과 중복 방지
 - 개인 가격 알림
@@ -97,10 +100,12 @@ GET  /health
 GET  /ready
 POST /jobs/tick
 POST /jobs/morning
+POST /jobs/report/{report_type}
 POST /telegram/webhook
 ```
 
-`/jobs/tick`과 `/jobs/morning`은 `Authorization: Bearer <CRON_SECRET>`을
+`/jobs/tick`, `/jobs/morning`, `/jobs/report/{report_type}`은
+`Authorization: Bearer <CRON_SECRET>`을
 검증합니다. Telegram 웹훅은 `X-Telegram-Bot-Api-Secret-Token`과 허용된
 `TELEGRAM_CHAT_ID`를 모두 검증합니다.
 
@@ -122,9 +127,11 @@ TELEGRAM_WEBHOOK_SECRET
 RUN_MODE=serverless
 RUN_ON_START=false
 STATE_DIR=/data
-ENABLED_REPORTS=morning
+ENABLED_REPORTS=morning,korea_close,europe_close
 ENABLE_EVENT_ALERTS=true
 ENABLE_EMERGENCY_ALERTS=true
+BREAKING_ALERT_MODE=balanced
+AUTO_AI_DAILY_LIMIT=6
 ENABLE_AI_ADVISOR=true
 AI_ADVISOR_DAILY_LIMIT=5
 AI_CURRENT_CAUSE_DAILY_LIMIT=3
@@ -153,7 +160,7 @@ Secrets에만 저장합니다.
 ## 저비용 배포
 
 - 웹 서비스: Serverless, 1 Replica, `/data` Volume, 256MB, 0.25 vCPU
-- Cron 서비스: `20,50 * * * *` UTC, 시작 명령 `python -m jin_market_pulse.cron`
+- Cron 서비스: `5,20,35,50 * * * *` UTC, 시작 명령 `python -m jin_market_pulse.cron`
 - GitHub 백업: 매일 `06:58 KST`에 `/jobs/morning` 호출
 - 빌드: Railpack, Python 3.12
 - Healthcheck: `/health`

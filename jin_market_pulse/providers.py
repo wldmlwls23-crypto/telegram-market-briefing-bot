@@ -39,6 +39,15 @@ YAHOO_ASSETS: dict[str, dict[str, str]] = {
     "wti": {"symbol": "CL=F", "name": "WTI 유가", "kind": "commodity", "unit": "USD"},
 }
 
+SESSION_ASSETS: dict[str, dict[str, str]] = {
+    "samsung": {"symbol": "005930.KS", "name": "삼성전자", "kind": "index", "unit": "원"},
+    "skhynix": {"symbol": "000660.KS", "name": "SK하이닉스", "kind": "index", "unit": "원"},
+    "nasdaq_futures": {"symbol": "NQ=F", "name": "Nasdaq 선물", "kind": "index", "unit": "pt"},
+    "eurostoxx50": {"symbol": "^STOXX50E", "name": "Euro Stoxx 50", "kind": "index", "unit": "pt"},
+    "dax": {"symbol": "^GDAXI", "name": "DAX", "kind": "index", "unit": "pt"},
+    "eurusd": {"symbol": "EURUSD=X", "name": "EUR/USD", "kind": "fx", "unit": ""},
+}
+
 YAHOO_CRYPTO_ASSETS: dict[str, dict[str, str]] = {
     "btc": {"symbol": "BTC-USD", "name": "BTC", "kind": "crypto", "unit": "USD"},
     "eth": {"symbol": "ETH-USD", "name": "ETH", "kind": "crypto", "unit": "USD"},
@@ -61,6 +70,11 @@ PROXY_ASSETS: dict[str, dict[str, str]] = {
     "kospi": {"symbol": "EWY", "name": "한국 주식 대용 ETF", "kind": "index", "unit": "USD"},
     "wti": {"symbol": "USO", "name": "WTI 대용 ETF", "kind": "commodity", "unit": "USD"},
     "gold": {"symbol": "GLD", "name": "금 대용 ETF", "kind": "commodity", "unit": "USD"},
+    "nasdaq_futures": {"symbol": "QQQ", "name": "Nasdaq 대용 ETF", "kind": "index", "unit": "USD"},
+    "eurostoxx50": {"symbol": "FEZ", "name": "유로존 주식 대용 ETF", "kind": "index", "unit": "USD"},
+    "dax": {"symbol": "EWG", "name": "독일 주식 대용 ETF", "kind": "index", "unit": "USD"},
+    "eurusd": {"symbol": "FXE", "name": "유로 대용 ETF", "kind": "fx", "unit": "USD"},
+    "usdkrw": {"symbol": "UUP", "name": "달러 대용 ETF", "kind": "fx", "unit": "USD"},
 }
 
 OUTLIER_THRESHOLDS = {
@@ -72,9 +86,13 @@ OUTLIER_THRESHOLDS = {
     "kospi": 3.0,
     "kosdaq": 3.0,
     "dxy": 0.7,
-    "usdkrw": 2.0,
+    "usdkrw": 0.7,
     "wti": 5.0,
     "gold": 5.0,
+    "nasdaq_futures": 3.0,
+    "eurostoxx50": 3.0,
+    "dax": 3.0,
+    "eurusd": 0.7,
 }
 
 
@@ -211,17 +229,21 @@ def fetch_yahoo_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
     return result
 
 
-def _fetch_yahoo_intraday(
+def fetch_yahoo_intraday_series(
+    key: str,
+    definition: dict[str, str],
     settings: Settings,
     *,
     interval: str,
+    hours: int = 24,
 ) -> PriceSeries:
+    symbol = url_quote(definition["symbol"], safe="")
     response = request(
         "GET",
-        YAHOO_CHART_URL.format(symbol="BTC-USD"),
+        YAHOO_CHART_URL.format(symbol=symbol),
         settings,
         provider="yahoo",
-        params={"range": "2d", "interval": interval, "includePrePost": "true"},
+        params={"range": "5d", "interval": interval, "includePrePost": "true"},
         session=_session(),
     )
     result = response.json()["chart"]["result"][0]
@@ -236,13 +258,61 @@ def _fetch_yahoo_intraday(
         if value is not None
     ]
     if points:
-        cutoff = points[-1].timestamp - timedelta(hours=24)
+        cutoff = points[-1].timestamp - timedelta(hours=hours)
         points = [point for point in points if point.timestamp >= cutoff]
     return PriceSeries(
-        key="btc",
-        name="BTC",
+        key=key,
+        name=definition["name"],
         points=points,
         source="Yahoo Finance",
+    )
+
+
+def fetch_intraday_series(
+    key: str,
+    settings: Settings,
+    *,
+    hours: int = 24,
+    minimum_points: int = 2,
+) -> PriceSeries:
+    definition = (
+        YAHOO_CRYPTO_ASSETS.get(key)
+        or YAHOO_ASSETS.get(key)
+        or SESSION_ASSETS.get(key)
+    )
+    if not definition:
+        raise KeyError(f"Unsupported intraday asset key: {key}")
+    errors: list[str] = []
+    for interval in ("5m", "15m"):
+        try:
+            series = fetch_yahoo_intraday_series(
+                key,
+                definition,
+                settings,
+                interval=interval,
+                hours=hours,
+            )
+            if len(series.points) >= minimum_points:
+                return series
+            errors.append(f"{interval}: {len(series.points)} valid points")
+        except Exception as exc:
+            errors.append(f"{interval}: {type(exc).__name__}")
+    raise RuntimeError(
+        f"{definition['name']} intraday series unavailable: " + "; ".join(errors)
+    )
+
+
+def _fetch_yahoo_intraday(
+    settings: Settings,
+    *,
+    interval: str,
+) -> PriceSeries:
+    return fetch_yahoo_intraday_series(
+        "btc",
+        YAHOO_CRYPTO_ASSETS["btc"],
+        settings,
+        interval=interval,
+        hours=24,
     )
 
 
@@ -255,7 +325,7 @@ def fetch_btc_intraday_series(settings: Settings) -> PriceSeries:
                 return series
             errors.append(f"{interval}: {len(series.points)} valid points")
         except Exception as exc:
-            errors.append(f"{interval}: {exc}")
+            errors.append(f"{interval}: {type(exc).__name__}")
     raise RuntimeError("BTC intraday series unavailable: " + "; ".join(errors))
 
 
@@ -407,8 +477,8 @@ def fetch_asset_quote(
         if key in YAHOO_CRYPTO_ASSETS:
             quote = fetch_yahoo_quote(key, YAHOO_CRYPTO_ASSETS[key], settings)
             quote.comparison_label = "직전 UTC 종가"
-        elif key in YAHOO_ASSETS:
-            definition = YAHOO_ASSETS[key]
+        elif key in YAHOO_ASSETS or key in SESSION_ASSETS:
+            definition = YAHOO_ASSETS.get(key) or SESSION_ASSETS[key]
             fmp_symbol = FMP_SYMBOLS.get(key)
             quote = (
                 fetch_fmp_quote(key, fmp_symbol, definition, settings)
@@ -719,6 +789,15 @@ def _verify_outlier_directions(
         else:
             quote.verified = False
             quote.quality_flags.append("FRED 금리 방향 불일치")
+
+
+def verify_outlier_directions(
+    quotes: dict[str, AssetQuote],
+    settings: Settings,
+) -> list[str]:
+    errors: list[str] = []
+    _verify_outlier_directions(quotes, settings, errors)
+    return errors
 
 
 def critical_data_errors(quotes: dict[str, AssetQuote]) -> list[str]:

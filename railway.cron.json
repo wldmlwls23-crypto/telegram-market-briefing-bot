@@ -5,7 +5,7 @@
   },
   "deploy": {
     "startCommand": "python -m jin_market_pulse.cron",
-    "cronSchedule": "20,50 * * * *",
+    "cronSchedule": "5,20,35,50 * * * *",
     "sleepApplication": false,
     "limitOverride": {
       "containers": {

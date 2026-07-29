@@ -14,7 +14,7 @@ from .models import AssetQuote
 
 
 UTC = timezone.utc
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StateStore:
@@ -159,8 +159,53 @@ class StateStore:
                     parse_mode TEXT NOT NULL DEFAULT 'HTML',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS report_runs (
+                    report_key TEXT PRIMARY KEY,
+                    report_type TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    text TEXT NOT NULL DEFAULT '',
+                    facts_json TEXT NOT NULL DEFAULT '[]',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    telegram_message_id INTEGER,
+                    skip_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_runs_type_updated
+                    ON report_runs(report_type, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS report_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_key TEXT NOT NULL,
+                    report_type TEXT NOT NULL,
+                    fact_key TEXT NOT NULL,
+                    numeric_value REAL,
+                    direction INTEGER NOT NULL DEFAULT 0,
+                    official INTEGER NOT NULL DEFAULT 0,
+                    sent_at TEXT NOT NULL,
+                    FOREIGN KEY(report_key) REFERENCES report_runs(report_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_facts_key_sent
+                    ON report_facts(fact_key, sent_at DESC);
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    state_key TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+            alert_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(alerts)").fetchall()
+            }
+            for column, definition in {
+                "payload_json": "TEXT NOT NULL DEFAULT '{}'",
+                "status": "TEXT NOT NULL DEFAULT 'sent'",
+                "last_observed_at": "TEXT",
+                "last_updated_at": "TEXT",
+            }.items():
+                if column not in alert_columns:
+                    db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
             db.execute(
                 """
                 INSERT INTO metadata(key, value) VALUES('schema_version', ?)
@@ -287,34 +332,109 @@ class StateStore:
             ).fetchone()
         return int(row["count"])
 
+    def pending_alerts(
+        self,
+        *,
+        status: str = "pending_cause",
+        max_age_minutes: int = 60,
+    ) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(UTC) - timedelta(minutes=max_age_minutes)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM alerts
+                WHERE status=? AND sent_at>=?
+                ORDER BY sent_at DESC
+                """,
+                (status, cutoff),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["urls"] = self._loads(item.pop("urls_json", "[]"), [])
+            item["payload"] = self._loads(item.pop("payload_json", "{}"), {})
+            result.append(item)
+        return result
+
     def mark_alert(
         self,
         topic_key: str,
         title: str,
         urls: list[str],
         telegram_message_id: int | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+        status: str = "sent",
     ) -> None:
+        now = datetime.now(UTC).isoformat()
         with self._connect(write=True) as db:
             db.execute(
                 """
                 INSERT INTO alerts(
-                    topic_key, title, urls_json, sent_at, telegram_message_id
-                ) VALUES(?, ?, ?, ?, ?)
+                    topic_key, title, urls_json, sent_at, telegram_message_id,
+                    payload_json, status, last_observed_at, last_updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic_key) DO UPDATE SET
                     title=excluded.title,
                     urls_json=excluded.urls_json,
                     sent_at=excluded.sent_at,
                     telegram_message_id=COALESCE(
                         excluded.telegram_message_id, alerts.telegram_message_id
-                    )
+                    ),
+                    payload_json=excluded.payload_json,
+                    status=excluded.status,
+                    last_observed_at=excluded.last_observed_at,
+                    last_updated_at=excluded.last_updated_at,
+                    update_count=alerts.update_count + CASE
+                        WHEN alerts.telegram_message_id IS NOT NULL THEN 1 ELSE 0 END
                 """,
                 (
                     topic_key,
                     title,
                     self._json(urls),
-                    datetime.now(UTC).isoformat(),
+                    now,
                     telegram_message_id,
+                    self._json(payload or {}),
+                    status,
+                    now,
+                    now,
                 ),
+            )
+
+    def alert_record(self, topic_key: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM alerts WHERE topic_key=?",
+                (topic_key,),
+            ).fetchone()
+        if not row:
+            return {}
+        result = dict(row)
+        result["urls"] = self._loads(result.pop("urls_json", "[]"), [])
+        result["payload"] = self._loads(result.pop("payload_json", "{}"), {})
+        return result
+
+    def touch_alert(
+        self,
+        topic_key: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        status: str | None = None,
+    ) -> None:
+        assignments = ["last_observed_at=?", "last_updated_at=?"]
+        now = datetime.now(UTC).isoformat()
+        values: list[Any] = [now, now]
+        if payload is not None:
+            assignments.append("payload_json=?")
+            values.append(self._json(payload))
+        if status is not None:
+            assignments.append("status=?")
+            values.append(status)
+        values.append(topic_key)
+        with self._connect(write=True) as db:
+            db.execute(
+                f"UPDATE alerts SET {', '.join(assignments)} WHERE topic_key=?",
+                tuple(values),
             )
 
     def event_record(self, event_id: str) -> dict[str, Any]:
@@ -323,6 +443,20 @@ class StateStore:
                 "SELECT payload_json FROM events WHERE event_id=?", (event_id,)
             ).fetchone()
         return self._loads(row["payload_json"], {}) if row else {}
+
+    def recent_event_result_titles(self, hours: int = 6) -> list[str]:
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT payload_json FROM events WHERE updated_at>=?",
+                (cutoff,),
+            ).fetchall()
+        result: list[str] = []
+        for row in rows:
+            payload = self._loads(row["payload_json"], {})
+            if payload.get("result_sent_at"):
+                result.append(str(payload.get("title") or "").lower())
+        return result
 
     def update_event(self, event_id: str, **values: Any) -> None:
         now = datetime.now(UTC).isoformat()
@@ -370,7 +504,10 @@ class StateStore:
                 "as_of": quote.as_of.isoformat(),
             }
             for key, quote in quotes.items()
-            if key in {"btc", "eth", "dxy", "nasdaq100", "kospi", "us10y", "wti", "gold"}
+            if key in {
+                "btc", "eth", "dxy", "nasdaq100", "kospi", "kosdaq",
+                "usdkrw", "us10y", "wti", "gold"
+            }
         }
         cutoff = (now - timedelta(days=7)).isoformat()
         with self._connect(write=True) as db:
@@ -801,6 +938,10 @@ class StateStore:
         defaults = {
             "emergency_alerts": True,
             "event_alerts": True,
+            "korea_close_reports": True,
+            "europe_close_reports": True,
+            "europe_silent": True,
+            "overnight_silent": True,
             "muted_until": "",
         }
         with self._connect() as db:
@@ -961,6 +1102,137 @@ class StateStore:
                 (f"{prefix}%",),
             ).fetchone()
         return dict(row) if row else None
+
+    def record_report_run(
+        self,
+        report_key: str,
+        report_type: str,
+        session_date: str,
+        status: str,
+        *,
+        text: str = "",
+        facts: list[dict[str, Any]] | None = None,
+        metrics: dict[str, Any] | None = None,
+        telegram_message_id: int | None = None,
+        skip_reason: str = "",
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        fact_rows = facts or []
+        with self._connect(write=True) as db:
+            db.execute(
+                """
+                INSERT INTO report_runs(
+                    report_key, report_type, session_date, status, text,
+                    facts_json, metrics_json, telegram_message_id,
+                    skip_reason, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(report_key) DO UPDATE SET
+                    status=excluded.status,
+                    text=excluded.text,
+                    facts_json=excluded.facts_json,
+                    metrics_json=excluded.metrics_json,
+                    telegram_message_id=COALESCE(
+                        excluded.telegram_message_id,
+                        report_runs.telegram_message_id
+                    ),
+                    skip_reason=excluded.skip_reason,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    report_key,
+                    report_type,
+                    session_date,
+                    status,
+                    text,
+                    self._json(fact_rows),
+                    self._json(metrics or {}),
+                    telegram_message_id,
+                    skip_reason[:500],
+                    now,
+                    now,
+                ),
+            )
+            db.execute("DELETE FROM report_facts WHERE report_key=?", (report_key,))
+            if status == "sent":
+                for fact in fact_rows:
+                    db.execute(
+                        """
+                        INSERT INTO report_facts(
+                            report_key, report_type, fact_key, numeric_value,
+                            direction, official, sent_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            report_key,
+                            report_type,
+                            str(fact["fact_key"]),
+                            fact.get("numeric_value"),
+                            int(fact.get("direction") or 0),
+                            1 if fact.get("official") else 0,
+                            now,
+                        ),
+                    )
+
+    def latest_report_run(self, report_type: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT * FROM report_runs
+                WHERE report_type=?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (report_type,),
+            ).fetchone()
+        if not row:
+            return {}
+        result = dict(row)
+        result["facts"] = self._loads(result.pop("facts_json", "[]"), [])
+        result["metrics"] = self._loads(result.pop("metrics_json", "{}"), {})
+        return result
+
+    def recent_report_facts(self, hours: int = 18) -> dict[str, dict[str, Any]]:
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT fact_key, numeric_value, direction, official, sent_at,
+                       report_type
+                FROM report_facts
+                WHERE sent_at>=?
+                ORDER BY sent_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            result.setdefault(str(row["fact_key"]), dict(row))
+        return result
+
+    def set_runtime_state(self, key: str, payload: dict[str, Any]) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect(write=True) as db:
+            db.execute(
+                """
+                INSERT INTO runtime_state(state_key, payload_json, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (key, self._json(payload), now),
+            )
+
+    def runtime_state(self, key: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT payload_json, updated_at FROM runtime_state WHERE state_key=?",
+                (key,),
+            ).fetchone()
+        if not row:
+            return {}
+        payload = self._loads(row["payload_json"], {})
+        payload["_updated_at"] = row["updated_at"]
+        return payload
 
     def readiness(self) -> dict[str, Any]:
         with self._connect() as db:
