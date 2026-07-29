@@ -24,7 +24,7 @@ from .providers import (
 from .reports import format_quote
 from .session_reports import next_report_time
 from .state import StateStore
-from .telegram import MAIN_KEYBOARD
+from .telegram import MAIN_KEYBOARD, REMOVE_KEYBOARD
 
 
 Intent = Literal[
@@ -1078,23 +1078,27 @@ def handle_market_query(
     if route.intent == "help":
         return BotResponse(_help(), MAIN_KEYBOARD)
     if route.intent == "brief":
-        return BotResponse(_brief(store), MAIN_KEYBOARD)
+        return BotResponse(_brief(store))
     if route.intent == "last":
         return _last_response(text, store)
     if route.intent == "status":
-        return BotResponse(_status(settings, store), MAIN_KEYBOARD)
+        return BotResponse(_status(settings, store))
     if route.intent == "settings":
-        return BotResponse(_settings(text, settings, store), MAIN_KEYBOARD)
+        return BotResponse(_settings(text, settings, store))
     if route.intent == "mute":
-        return BotResponse(_mute(text, settings, store), MAIN_KEYBOARD)
+        return BotResponse(_mute(text, settings, store))
     if route.intent == "reset":
         if store:
             store.reset_chat_context(settings.telegram_chat_id)
-        return BotResponse("대화 문맥을 초기화했습니다.", MAIN_KEYBOARD)
+        return BotResponse(
+            "최근 대화 연결만 초기화했습니다.\n"
+            "가격 알림, 알림 설정, 저장된 리포트와 시장 데이터는 그대로입니다.",
+            REMOVE_KEYBOARD,
+        )
     if route.intent == "alerts":
-        return BotResponse(_alerts(text, settings, store), MAIN_KEYBOARD)
+        return BotResponse(_alerts(text, settings, store))
     if route.intent == "alert_create":
-        return BotResponse(_alert_create(text, route.asset_keys, settings, store), MAIN_KEYBOARD)
+        return BotResponse(_alert_create(text, route.asset_keys, settings, store))
     if route.intent == "calendar":
         result = _calendar(settings, route.period or "24h")
     elif route.intent == "markets":
@@ -1122,7 +1126,6 @@ def handle_market_query(
         return BotResponse(
             "질문을 정확히 이해하지 못했습니다.\n"
             "예: <i>이더 얼마야</i> · <i>코스피 왜 떨어져?</i> · <i>이번 주 일정</i>",
-            MAIN_KEYBOARD,
         )
 
     if store:

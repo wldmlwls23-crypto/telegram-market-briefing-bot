@@ -17,15 +17,23 @@ SAFE_PART_LIMIT = 3800
 MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 
 MAIN_KEYBOARD = {
-    "keyboard": [
-        [{"text": "현재 시장"}, {"text": "오늘 일정"}],
-        [{"text": "이번 주"}, {"text": "왜 움직여?"}],
-        [{"text": "최근 리포트"}, {"text": "상태"}],
+    "inline_keyboard": [
+        [
+            {"text": "현재 시장", "callback_data": "cmd:markets"},
+            {"text": "오늘 일정", "callback_data": "cmd:calendar"},
+        ],
+        [
+            {"text": "이번 주", "callback_data": "cmd:week"},
+            {"text": "왜 움직여?", "callback_data": "cmd:cause"},
+        ],
+        [
+            {"text": "최근 리포트", "callback_data": "cmd:last"},
+            {"text": "상태", "callback_data": "cmd:status"},
+        ],
     ],
-    "resize_keyboard": True,
-    "is_persistent": True,
-    "input_field_placeholder": "시장 질문을 입력하세요",
 }
+
+REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 BOT_COMMANDS = [
     {"command": "start", "description": "처음 화면과 빠른 버튼"},
@@ -40,7 +48,7 @@ BOT_COMMANDS = [
     {"command": "mute", "description": "자동 알림 잠시 끄기"},
     {"command": "settings", "description": "알림 설정"},
     {"command": "status", "description": "봇과 데이터 상태"},
-    {"command": "reset", "description": "대화 문맥 초기화"},
+    {"command": "reset", "description": "최근 대화 연결만 초기화"},
     {"command": "help", "description": "질문 예시와 사용법"},
 ]
 

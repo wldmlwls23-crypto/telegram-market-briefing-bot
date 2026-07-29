@@ -23,6 +23,7 @@ from jin_market_pulse.models import AssetQuote
 from jin_market_pulse.state import StateStore
 from jin_market_pulse.telegram import (
     MAIN_KEYBOARD,
+    REMOVE_KEYBOARD,
     SAFE_PART_LIMIT,
     split_html_message,
 )
@@ -33,7 +34,7 @@ def test_router_does_not_mistake_jigeum_or_rate_for_gold():
     assert route_query("금 가격 얼마야").asset_keys == ["gold"]
 
 
-def test_start_returns_persistent_mobile_keyboard(settings, tmp_path):
+def test_start_returns_non_persistent_inline_actions(settings, tmp_path):
     response = handle_market_query(
         "/start",
         settings,
@@ -41,8 +42,26 @@ def test_start_returns_persistent_mobile_keyboard(settings, tmp_path):
     )
 
     assert response.reply_markup == MAIN_KEYBOARD
-    assert response.reply_markup["resize_keyboard"] is True
+    assert "keyboard" not in response.reply_markup
+    assert "inline_keyboard" in response.reply_markup
     assert "현재 시장" in str(response.reply_markup)
+
+
+def test_reset_only_clears_conversation_context(settings, tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.set_chat_context(settings.telegram_chat_id, {"asset_key": "btc"})
+    store.update_preferences(
+        settings.telegram_chat_id,
+        emergency_alerts=False,
+    )
+
+    response = handle_market_query("/reset", settings, store)
+
+    assert store.get_chat_context(settings.telegram_chat_id) == {}
+    assert store.preferences(settings.telegram_chat_id)["emergency_alerts"] is False
+    assert response.reply_markup == REMOVE_KEYBOARD
+    assert "가격 알림" in response.text
+    assert "그대로" in response.text
 
 
 def test_ambiguous_treasury_question_returns_two_buttons(settings):
