@@ -31,6 +31,7 @@ from .reports import (
     fallback_morning_analysis,
     render_data_health_alert,
     render_morning_report,
+    select_future_events,
 )
 from .state import StateStore
 from .session_reports import send_session_report
@@ -220,6 +221,17 @@ class MarketPulseApp:
                 facts=report_facts,
                 telegram_message_id=text_message_id,
             )
+            tracked_at = datetime.now(KST).isoformat()
+            for event in select_future_events(data):
+                self.state.update_event(
+                    event.event_id,
+                    title=event.title,
+                    event_time=event.event_time_kst.isoformat(),
+                    importance=event.importance,
+                    forecast=event.forecast,
+                    previous=event.previous,
+                    tracked_for_result_at=tracked_at,
+                )
             self.state.finish_job(delivery_key, success=True)
             logging.info("Morning Market Report sent successfully.")
             return "sent"

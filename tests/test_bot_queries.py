@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta
 
-from jin_market_pulse.bot_queries import _calendar_html, answer_market_query
+from jin_market_pulse.bot_queries import (
+    _calendar_html,
+    answer_market_query,
+    handle_market_query,
+)
+from jin_market_pulse.config import KST
 from jin_market_pulse.state import StateStore
 
 
@@ -145,7 +151,7 @@ def test_weekly_calendar_natural_language_uses_detailed_mobile_format(
     event = market_data.events[0]
     monkeypatch.setattr(
         "jin_market_pulse.bot_queries.fetch_economic_events",
-        lambda _settings, days_ahead: [event],
+        lambda _settings, days_ahead, **_kwargs: [event],
     )
     monkeypatch.setattr(
         "jin_market_pulse.bot_queries._week_events",
@@ -171,3 +177,27 @@ def test_calendar_html_escapes_dynamic_event_text(market_data):
 
     assert "CPI &lt;속보&gt;" in answer
     assert "예상: &lt;0.2%" in answer
+
+
+def test_calendar_query_tracks_selected_event_for_result_followup(
+    settings,
+    tmp_path,
+    monkeypatch,
+    market_data,
+):
+    store = StateStore(tmp_path / "state.sqlite3")
+    event = market_data.events[0].model_copy(
+        update={
+            "event_time_kst": datetime.now(KST) + timedelta(hours=1),
+            "importance": "★★★★",
+        }
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.bot_queries.fetch_economic_events",
+        lambda *_args, **_kwargs: [event],
+    )
+
+    response = handle_market_query("/calendar", settings, store)
+
+    assert event.title_ko in response.text
+    assert store.event_record(event.event_id)["tracked_for_result_at"]

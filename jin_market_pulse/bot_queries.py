@@ -671,13 +671,29 @@ def _markets(settings: Settings) -> str:
     return "\n".join(lines)
 
 
-def _calendar(settings: Settings, period: str) -> str:
+def _calendar(
+    settings: Settings,
+    period: str,
+    store: StateStore | None = None,
+) -> str:
     now = datetime.now(KST)
     days = 14 if period == "next_week" else 8 if period == "this_week" else 2
-    events = fetch_economic_events(settings, days_ahead=days)
+    events = fetch_economic_events(settings, days_ahead=days, store=store)
     selected, title = _calendar_range(events, period or "24h", now)
     if period == "this_week":
         selected = _week_events(events, now)
+    if store:
+        tracked_at = now.isoformat()
+        for event in selected:
+            store.update_event(
+                event.event_id,
+                title=event.title,
+                event_time=event.event_time_kst.isoformat(),
+                importance=event.importance,
+                forecast=event.forecast,
+                previous=event.previous,
+                tracked_for_result_at=tracked_at,
+            )
     return _calendar_html(selected, title=title)
 
 
@@ -1110,7 +1126,7 @@ def handle_market_query(
     if route.intent == "alert_create":
         return BotResponse(_alert_create(text, route.asset_keys, settings, store))
     if route.intent == "calendar":
-        result = _calendar(settings, route.period or "24h")
+        result = _calendar(settings, route.period or "24h", store)
     elif route.intent == "markets":
         result = _markets(settings)
     elif route.intent == "compare":

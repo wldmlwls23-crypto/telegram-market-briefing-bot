@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -18,8 +19,9 @@ from .telegram import TelegramClient
 PRE_EVENT_MINUTES_MIN = 60
 PRE_EVENT_MINUTES_MAX = 90
 BASELINE_WINDOW_MINUTES = 30
-RESULT_MIN_DELAY_MINUTES = 5
-RESULT_RETRY_WINDOW_MINUTES = 120
+RESULT_MIN_DELAY_MINUTES = 0
+RESULT_RETRY_WINDOW_MINUTES = 240
+RESULT_LOOKBACK_HOURS = 6
 
 
 def _as_events(value: EconomicEvent | list[EconomicEvent]) -> list[EconomicEvent]:
@@ -120,7 +122,10 @@ def capture_due_event_baselines(settings: Settings, state: StateStore) -> None:
             days_ahead=1,
             store=state,
         )
-        if event.importance == "★★★★★"
+        if (
+            event.importance == "★★★★★"
+            or state.event_record(event.event_id).get("tracked_for_result_at")
+        )
         and now <= event.event_time_kst <= window_end
         and not state.event_record(event.event_id).get("before_snapshot")
     ]
@@ -183,6 +188,9 @@ def render_event_result(
         lines.append(f"<b>{html.escape(event.country_ko)} · {html.escape(event.title_ko)}</b>")
         if event.value_summary:
             lines.append(html.escape(event.value_summary))
+        verdict = _result_verdict(event)
+        if verdict:
+            lines.append(html.escape(verdict))
         lines.append(f"의미: {html.escape(event_meaning(event))}")
         if event.actual and event.forecast:
             lines.append(
@@ -191,10 +199,44 @@ def render_event_result(
                 " / 하회 시 "
                 f"{html.escape(event.sensitivity_weaker)}"
             )
+        lines.append(f"출처: {html.escape(event.source)}")
     reaction = _reaction_lines(before_snapshot, quotes)
     if reaction:
         lines.extend(["", "<b>발표 전후 시장 반응:</b>", *reaction])
     return "\n".join(lines)
+
+
+def _numeric_result(value: str) -> float | None:
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", value)
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _comparison_label(actual: float, reference: float, *, name: str) -> str:
+    tolerance = max(abs(reference) * 1e-6, 1e-9)
+    if actual > reference + tolerance:
+        return f"{name}보다 높음"
+    if actual < reference - tolerance:
+        return f"{name}보다 낮음"
+    return f"{name}과 같음"
+
+
+def _result_verdict(event: EconomicEvent) -> str:
+    actual = _numeric_result(event.actual)
+    if actual is None:
+        return ""
+    comparisons: list[str] = []
+    forecast = _numeric_result(event.forecast)
+    previous = _numeric_result(event.previous)
+    if forecast is not None:
+        comparisons.append(_comparison_label(actual, forecast, name="예상"))
+    if previous is not None:
+        comparisons.append(_comparison_label(actual, previous, name="이전"))
+    return f"판정: {' · '.join(comparisons)}" if comparisons else ""
 
 
 def send_due_event_results(
@@ -205,47 +247,104 @@ def send_due_event_results(
     now = datetime.now(KST)
     events = fetch_economic_events(
         settings,
-        lookback_hours=3,
+        lookback_hours=RESULT_LOOKBACK_HOURS,
         days_ahead=0,
         store=state,
     )
     due = [
         event
         for event in events
-        if event.importance == "★★★★★"
+        if (
+            event.importance == "★★★★★"
+            or state.event_record(event.event_id).get("tracked_for_result_at")
+        )
         and event.actual
         and timedelta(minutes=RESULT_MIN_DELAY_MINUTES)
         <= now - event.event_time_kst
         <= timedelta(minutes=RESULT_RETRY_WINDOW_MINUTES)
     ]
     for group in _group_events_by_time(due):
+        records = {
+            event.event_id: state.event_record(event.event_id)
+            for event in group
+        }
         unsent = [
             event
             for event in group
-            if not state.event_record(event.event_id).get("result_sent_at")
+            if not records[event.event_id].get("result_sent_at")
+        ]
+        changed = [
+            event
+            for event in group
+            if records[event.event_id].get("result_sent_at")
+            and records[event.event_id].get("actual") != event.actual
         ]
         if not unsent:
             # Correct prior messages only when the published number changed.
-            for event in group:
-                record = state.event_record(event.event_id)
-                if record.get("actual") == event.actual:
-                    continue
-                message_id = record.get("result_message_id")
-                if message_id:
-                    quotes, _ = fetch_market_quotes(settings, state)
-                    before = record.get("before_snapshot", {})
-                    telegram.edit(
-                        int(message_id),
-                        render_event_result(event, before, quotes),
-                    )
-                    state.update_event(event.event_id, actual=event.actual)
+            if not changed:
+                continue
+            message_id = next(
+                (
+                    records[event.event_id].get("result_message_id")
+                    for event in group
+                    if records[event.event_id].get("result_message_id")
+                ),
+                None,
+            )
+            if message_id:
+                quotes, _ = fetch_market_quotes(settings, state)
+                before = next(
+                    (
+                        records[event.event_id].get("before_snapshot")
+                        for event in group
+                        if records[event.event_id].get("before_snapshot")
+                    ),
+                    {},
+                )
+                edited = telegram.edit(
+                    int(message_id),
+                    render_event_result(group, before, quotes),
+                )
+                if edited:
+                    for event in changed:
+                        state.update_event(event.event_id, actual=event.actual)
             continue
         quotes, _ = fetch_market_quotes(settings, state)
-        before = state.event_record(unsent[0].event_id).get("before_snapshot", {})
-        message_ids = telegram.send(
-            render_event_result(unsent, before, quotes),
-            parse_mode="HTML",
+        before = next(
+            (
+                records[event.event_id].get("before_snapshot")
+                for event in group
+                if records[event.event_id].get("before_snapshot")
+            ),
+            {},
         )
+        existing_message_id = next(
+            (
+                records[event.event_id].get("result_message_id")
+                for event in group
+                if records[event.event_id].get("result_message_id")
+            ),
+            None,
+        )
+        if existing_message_id:
+            edited = telegram.edit(
+                int(existing_message_id),
+                render_event_result(group, before, quotes),
+            )
+            if edited:
+                message_ids = [int(existing_message_id)]
+                for event in changed:
+                    state.update_event(event.event_id, actual=event.actual)
+            else:
+                message_ids = telegram.send(
+                    render_event_result(group, before, quotes),
+                    parse_mode="HTML",
+                )
+        else:
+            message_ids = telegram.send(
+                render_event_result(group, before, quotes),
+                parse_mode="HTML",
+            )
         for event in unsent:
             state.update_event(
                 event.event_id,

@@ -28,6 +28,8 @@ def test_event_result_contains_actual_and_market_reaction(market_data):
 
     assert text.startswith("<b>[중요 경제지표 결과]</b>")
     assert "실제 0.3% / 예상 0.2% / 이전 0.1%" in text
+    assert "판정: 예상보다 높음 · 이전보다 높음" in text
+    assert "출처:" in text
     assert "발표 전후 시장 반응:" in text
     assert "BTC: 발표 전 100,000.00" in text
 
