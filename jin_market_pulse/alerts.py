@@ -125,6 +125,7 @@ def capture_due_event_baselines(settings: Settings, state: StateStore) -> None:
         if (
             event.importance == "★★★★★"
             or state.event_record(event.event_id).get("tracked_for_result_at")
+            or state.tracked_event_id_at(event.event_time_kst)
         )
         and now <= event.event_time_kst <= window_end
         and not state.event_record(event.event_id).get("before_snapshot")
@@ -258,6 +259,7 @@ def send_due_event_results(
         if (
             event.importance == "★★★★★"
             or state.event_record(event.event_id).get("tracked_for_result_at")
+            or state.tracked_event_id_at(event.event_time_kst)
         )
         and event.actual
         and timedelta(minutes=RESULT_MIN_DELAY_MINUTES)
@@ -278,6 +280,7 @@ def send_due_event_results(
             event
             for event in group
             if records[event.event_id].get("result_sent_at")
+            and records[event.event_id].get("actual")
             and records[event.event_id].get("actual") != event.actual
         ]
         if not unsent:
@@ -355,6 +358,14 @@ def send_due_event_results(
                 actual=event.actual,
                 result_message_id=message_ids[0] if message_ids else None,
             )
+            tracked_id = state.tracked_event_id_at(event.event_time_kst)
+            if tracked_id and tracked_id != event.event_id:
+                state.update_event(
+                    tracked_id,
+                    stage="result_sent_via_fallback",
+                    result_sent_at=now.isoformat(),
+                    result_message_id=message_ids[0] if message_ids else None,
+                )
         delivered += len(unsent)
         logging.info("Event result update sent for %s event(s).", len(unsent))
     return delivered

@@ -444,6 +444,35 @@ class StateStore:
             ).fetchone()
         return self._loads(row["payload_json"], {}) if row else {}
 
+    def tracked_event_id_at(
+        self,
+        event_time: datetime,
+        *,
+        tolerance_minutes: int = 2,
+    ) -> str | None:
+        cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT event_id, payload_json FROM events WHERE updated_at>=?",
+                (cutoff,),
+            ).fetchall()
+        closest: tuple[float, str] | None = None
+        for row in rows:
+            payload = self._loads(row["payload_json"], {})
+            if not payload.get("tracked_for_result_at") or not payload.get("event_time"):
+                continue
+            try:
+                tracked_time = datetime.fromisoformat(str(payload["event_time"]))
+                delta = abs((tracked_time - event_time).total_seconds())
+            except (TypeError, ValueError):
+                continue
+            if delta > tolerance_minutes * 60:
+                continue
+            candidate = (delta, str(row["event_id"]))
+            if closest is None or candidate < closest:
+                closest = candidate
+        return closest[1] if closest else None
+
     def recent_event_result_titles(self, hours: int = 6) -> list[str]:
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         with self._connect() as db:

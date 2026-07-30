@@ -8,6 +8,7 @@ from jin_market_pulse.calendar import (
     fetch_economic_events,
 )
 from jin_market_pulse.config import KST
+from jin_market_pulse.http_client import ProviderRequestError
 
 
 class FakeCalendarResponse:
@@ -109,6 +110,47 @@ def test_calendar_live_request_uses_compatible_headers_and_cache_buster(
     assert "JIN-Market-Pulse" in captured["headers"]["User-Agent"]
     assert captured["headers"]["Cache-Control"] == "no-cache"
     assert isinstance(captured["params"]["_"], int)
+
+
+def test_calendar_uses_live_tradingview_fallback_with_result_values(
+    monkeypatch,
+    settings,
+):
+    now = datetime.now(KST)
+    payload = {
+        "result": [
+            {
+                "title": "Core PCE Price Index YoY",
+                "currency": "USD",
+                "date": (now - timedelta(minutes=30)).isoformat(),
+                "importance": 1,
+                "actual": 3.2,
+                "forecast": 3.1,
+                "previous": 3.0,
+                "unit": "%",
+                "scale": None,
+            }
+        ]
+    }
+
+    def fake_request(_method, url, *_args, **_kwargs):
+        if "faireconomy" in url:
+            raise ProviderRequestError("economic_calendar", "blocked")
+        return FakeCalendarResponse(payload)
+
+    monkeypatch.setattr("jin_market_pulse.calendar.request", fake_request)
+
+    events = fetch_economic_events(
+        settings,
+        lookback_hours=2,
+        days_ahead=0,
+    )
+
+    assert len(events) == 1
+    assert events[0].actual == "3.2%"
+    assert events[0].forecast == "3.1%"
+    assert events[0].previous == "3%"
+    assert events[0].source == "TradingView economic calendar"
 
 
 def test_non_us_inflation_uses_country_market_axis(monkeypatch, settings):

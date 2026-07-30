@@ -120,3 +120,38 @@ def test_late_same_time_result_edits_existing_message(
     assert "ISM Services PMI" in telegram.edited[0][1]
     assert "ISM Prices" in telegram.edited[0][1]
     assert state.event_record(second.event_id)["result_message_id"] == 101
+
+
+def test_fallback_event_matches_tracked_time_without_duplicate(
+    settings,
+    tmp_path,
+    monkeypatch,
+):
+    state = StateStore(tmp_path / "state.sqlite3")
+    event_time = datetime.now(KST) - timedelta(minutes=10)
+    original = _event("primary-event", event_time, actual="")
+    fallback = _event("fallback-event", event_time, actual="51.2")
+    state.update_event(
+        original.event_id,
+        title=original.title,
+        event_time=event_time.isoformat(),
+        tracked_for_result_at=datetime.now(KST).isoformat(),
+    )
+    telegram = FakeTelegram()
+    batches = iter(([fallback], [original.model_copy(update={"actual": "51.2"})]))
+    monkeypatch.setattr(
+        "jin_market_pulse.alerts.fetch_economic_events",
+        lambda *_args, **_kwargs: next(batches),
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.alerts.fetch_market_quotes",
+        lambda *_args, **_kwargs: ({}, []),
+    )
+
+    first_delivered = send_due_event_results(settings, state, telegram)
+    second_delivered = send_due_event_results(settings, state, telegram)
+
+    assert first_delivered == 1
+    assert second_delivered == 0
+    assert len(telegram.sent) == 1
+    assert state.event_record(original.event_id)["stage"] == "result_sent_via_fallback"

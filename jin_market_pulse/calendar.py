@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +16,7 @@ from .state import StateStore
 
 
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+TRADINGVIEW_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
 CALENDAR_REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -24,6 +25,11 @@ CALENDAR_REQUEST_HEADERS = {
     ),
     "Accept": "application/json,text/plain,*/*",
     "Cache-Control": "no-cache",
+}
+TRADINGVIEW_REQUEST_HEADERS = {
+    "User-Agent": CALENDAR_REQUEST_HEADERS["User-Agent"],
+    "Accept": "application/json,text/plain,*/*",
+    "Origin": "https://www.tradingview.com",
 }
 BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
@@ -124,6 +130,65 @@ OFFICIAL_RELEASE_TERMS = {
 def _clean(value: Any) -> str:
     text = str(value or "").strip()
     return "" if text.lower() in {"", "none", "null", "n/a"} else text
+
+
+def _tradingview_value(item: dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    if value is None or value == "":
+        return ""
+    if isinstance(value, float):
+        text = f"{value:g}"
+    else:
+        text = str(value).strip()
+    unit = str(item.get("unit") or "").strip()
+    scale = str(item.get("scale") or "").strip()
+    if unit == "$":
+        return f"${text}{scale}"
+    if unit == "%":
+        return f"{text}%"
+    return f"{text}{scale}"
+
+
+def _tradingview_events(
+    settings: Settings,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    response = request(
+        "GET",
+        TRADINGVIEW_CALENDAR_URL,
+        settings,
+        provider="economic_calendar_fallback",
+        attempts=3,
+        headers=TRADINGVIEW_REQUEST_HEADERS,
+        params={
+            "from": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "to": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "countries": "US",
+        },
+        session=SimpleNamespace(get=requests.get),
+    )
+    payload = response.json()
+    items = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ProviderRequestError(
+            "economic_calendar_fallback",
+            "invalid JSON shape",
+        )
+    return [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "country": str(item.get("currency") or "USD").upper(),
+            "date": str(item.get("date") or ""),
+            "impact": "High" if int(item.get("importance") or -1) >= 1 else "Medium",
+            "actual": _tradingview_value(item, "actual"),
+            "forecast": _tradingview_value(item, "forecast"),
+            "previous": _tradingview_value(item, "previous"),
+            "source": "TradingView economic calendar",
+        }
+        for item in items
+        if isinstance(item, dict) and item.get("title") and item.get("date")
+    ]
 
 
 def _event_id(title: str, country: str, event_time: datetime) -> str:
@@ -473,12 +538,38 @@ def fetch_economic_events(
                 )
                 store.record_provider_result("economic_calendar", success=True)
         except Exception as exc:
+            fallback: list[dict[str, Any]] = []
+            try:
+                fallback = _tradingview_events(settings, start, end)
+            except Exception as fallback_exc:
+                if store:
+                    store.record_provider_result(
+                        "economic_calendar_fallback",
+                        success=False,
+                        error=type(fallback_exc).__name__,
+                    )
             cached = (
                 store.cache_get(cache_key, max_stale_seconds=7 * 24 * 3600)
                 if store
                 else None
             )
-            if cached and isinstance(cached["payload"], list):
+            if fallback:
+                raw_events.extend(fallback)
+                logging.info(
+                    "Economic calendar primary feed failed; using live fallback."
+                )
+                if store:
+                    store.cache_set(
+                        cache_key,
+                        fallback,
+                        source="TradingView economic calendar",
+                        ttl_seconds=15 * 60,
+                    )
+                    store.record_provider_result(
+                        "economic_calendar_fallback",
+                        success=True,
+                    )
+            elif cached and isinstance(cached["payload"], list):
                 raw_events.extend(
                     item
                     for item in cached["payload"]
