@@ -243,8 +243,9 @@ def send_due_event_results(
     settings: Settings,
     state: StateStore,
     telegram: TelegramClient,
-) -> None:
+) -> int:
     now = datetime.now(KST)
+    delivered = 0
     events = fetch_economic_events(
         settings,
         lookback_hours=RESULT_LOOKBACK_HOURS,
@@ -308,6 +309,7 @@ def send_due_event_results(
                 if edited:
                     for event in changed:
                         state.update_event(event.event_id, actual=event.actual)
+                    delivered += len(changed)
             continue
         quotes, _ = fetch_market_quotes(settings, state)
         before = next(
@@ -353,7 +355,9 @@ def send_due_event_results(
                 actual=event.actual,
                 result_message_id=message_ids[0] if message_ids else None,
             )
+        delivered += len(unsent)
         logging.info("Event result update sent for %s event(s).", len(unsent))
+    return delivered
 
 
 def _meaningful_market_move(

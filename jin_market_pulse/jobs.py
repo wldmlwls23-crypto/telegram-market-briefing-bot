@@ -384,7 +384,11 @@ def run_tick(
         if settings.enable_event_alerts and prefs["event_alerts"] and not muted:
             send_due_pre_event_reminders(settings, state, telegram)
             capture_due_event_baselines(settings, state)
-            send_due_event_results(settings, state, telegram)
+            result["event_results"] = send_due_event_results(
+                settings,
+                state,
+                telegram,
+            )
 
         if (
             settings.enable_emergency_alerts

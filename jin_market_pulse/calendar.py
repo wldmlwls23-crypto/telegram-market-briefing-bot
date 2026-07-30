@@ -16,6 +16,15 @@ from .state import StateStore
 
 
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+CALENDAR_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/138.0 Safari/537.36 JIN-Market-Pulse/2.3"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Cache-Control": "no-cache",
+}
 BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 CORE_COUNTRIES = {"USD", "KRW", "CNY", "EUR", "JPY"}
@@ -444,6 +453,8 @@ def fetch_economic_events(
                 settings,
                 provider="economic_calendar",
                 attempts=3,
+                headers=CALENDAR_REQUEST_HEADERS,
+                params={"_": int(now.timestamp() // 300)},
                 session=SimpleNamespace(get=requests.get),
             )
             payload = response.json()

@@ -71,8 +71,9 @@ def test_calendar_tracked_four_star_event_sends_result(
         lambda *_args, **_kwargs: ({}, []),
     )
 
-    send_due_event_results(settings, state, telegram)
+    delivered = send_due_event_results(settings, state, telegram)
 
+    assert delivered == 1
     assert len(telegram.sent) == 1
     assert "실제 51.2 / 예상 50.0 / 이전 49.0" in telegram.sent[0][0]
     assert state.event_record(event.event_id)["result_sent_at"]
@@ -108,9 +109,11 @@ def test_late_same_time_result_edits_existing_message(
         lambda *_args, **_kwargs: ({}, []),
     )
 
-    send_due_event_results(settings, state, telegram)
-    send_due_event_results(settings, state, telegram)
+    first_delivered = send_due_event_results(settings, state, telegram)
+    second_delivered = send_due_event_results(settings, state, telegram)
 
+    assert first_delivered == 1
+    assert second_delivered == 1
     assert len(telegram.sent) == 1
     assert len(telegram.edited) == 1
     assert telegram.edited[0][0] == 101

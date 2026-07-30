@@ -82,6 +82,35 @@ def test_calendar_lookback_keeps_actual_result(monkeypatch, settings):
     assert events[0].actual == "2.8%"
 
 
+def test_calendar_live_request_uses_compatible_headers_and_cache_buster(
+    monkeypatch,
+    settings,
+):
+    now = datetime.now(KST)
+    captured = {}
+    payload = [
+        {
+            "title": "Consumer Price Index y/y",
+            "country": "USD",
+            "date": (now + timedelta(hours=2)).isoformat(),
+            "impact": "High",
+            "forecast": "2.7%",
+            "previous": "2.6%",
+        }
+    ]
+
+    def fake_get(*_args, **kwargs):
+        captured.update(kwargs)
+        return FakeCalendarResponse(payload)
+
+    monkeypatch.setattr("jin_market_pulse.calendar.requests.get", fake_get)
+
+    assert fetch_economic_events(settings, days_ahead=1)
+    assert "JIN-Market-Pulse" in captured["headers"]["User-Agent"]
+    assert captured["headers"]["Cache-Control"] == "no-cache"
+    assert isinstance(captured["params"]["_"], int)
+
+
 def test_non_us_inflation_uses_country_market_axis(monkeypatch, settings):
     now = datetime.now(KST)
     payload = [
