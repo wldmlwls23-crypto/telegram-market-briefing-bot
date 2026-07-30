@@ -91,10 +91,10 @@ TITLE_KO = {
     "jobless claims": "신규 실업수당 청구",
     "unemployment rate": "실업률",
     "employment change": "고용 변화",
-    "final gdp": "GDP 확정치",
-    "advance gdp": "GDP 속보치",
-    "flash gdp": "GDP 속보치",
     "gdp price index": "GDP 물가지수",
+    "final gdp": "GDP 성장률 확정치",
+    "advance gdp": "GDP 성장률 속보치",
+    "flash gdp": "GDP 성장률 속보치",
     "ism manufacturing pmi": "ISM 제조업 PMI",
     "ism services pmi": "ISM 서비스업 PMI",
     "manufacturing pmi": "제조업 PMI",
@@ -287,6 +287,7 @@ def event_meaning(event: EconomicEvent) -> str:
         (("unemployment claims", "jobless claims"), "최근 미국 고용시장의 약화 여부"),
         (("unemployment rate",), "노동시장 전체의 실업 비율"),
         (("pmi", "ism"), "기업 활동을 통해 보는 경기 확장·위축"),
+        (("gdp price",), "미국 경제 전반의 물가 상승 속도"),
         (("gdp",), "경제 전체의 성장 속도"),
         (("retail sales",), "미국 소비지출의 강도"),
         (("consumer sentiment",), "소비자가 느끼는 경기와 지출 심리"),
@@ -539,8 +540,15 @@ def fetch_economic_events(
                 store.record_provider_result("economic_calendar", success=True)
         except Exception as exc:
             fallback: list[dict[str, Any]] = []
+            fallback_succeeded = False
             try:
                 fallback = _tradingview_events(settings, start, end)
+                fallback_succeeded = True
+                if store:
+                    store.record_provider_result(
+                        "economic_calendar_fallback",
+                        success=True,
+                    )
             except Exception as fallback_exc:
                 if store:
                     store.record_provider_result(
@@ -565,10 +573,6 @@ def fetch_economic_events(
                         source="TradingView economic calendar",
                         ttl_seconds=15 * 60,
                     )
-                    store.record_provider_result(
-                        "economic_calendar_fallback",
-                        success=True,
-                    )
             elif cached and isinstance(cached["payload"], list):
                 raw_events.extend(
                     item
@@ -588,8 +592,8 @@ def fetch_economic_events(
             if store:
                 store.record_provider_result(
                     "economic_calendar",
-                    success=False,
-                    error=type(exc).__name__,
+                    success=fallback_succeeded,
+                    error="" if fallback_succeeded else type(exc).__name__,
                 )
 
     if end >= start_of_next_week or not raw_events:

@@ -5,10 +5,12 @@ from datetime import datetime, timedelta
 from jin_market_pulse.calendar import (
     _official_bea_events,
     _official_bls_events,
+    _title_ko,
     fetch_economic_events,
 )
 from jin_market_pulse.config import KST
 from jin_market_pulse.http_client import ProviderRequestError
+from jin_market_pulse.state import StateStore
 
 
 class FakeCalendarResponse:
@@ -21,6 +23,11 @@ class FakeCalendarResponse:
 
     def json(self):
         return self.payload
+
+
+def test_gdp_growth_and_price_index_use_distinct_korean_titles():
+    assert _title_ko("Advance GDP q/q") == "GDP 성장률 속보치"
+    assert _title_ko("Advance GDP Price Index q/q") == "GDP 물가지수"
 
 
 def test_calendar_excludes_past_and_low_impact(monkeypatch, settings):
@@ -151,6 +158,39 @@ def test_calendar_uses_live_tradingview_fallback_with_result_values(
     assert events[0].forecast == "3.1%"
     assert events[0].previous == "3%"
     assert events[0].source == "TradingView economic calendar"
+
+
+def test_empty_live_fallback_is_healthy_not_an_outage(
+    monkeypatch,
+    settings,
+    tmp_path,
+):
+    state = StateStore(tmp_path / "state.sqlite3")
+
+    def fake_request(_method, url, *_args, **_kwargs):
+        if "faireconomy" in url:
+            raise ProviderRequestError("economic_calendar", "blocked")
+        return FakeCalendarResponse({"result": []})
+
+    monkeypatch.setattr("jin_market_pulse.calendar.request", fake_request)
+    monkeypatch.setattr(
+        "jin_market_pulse.calendar._official_bls_events",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        "jin_market_pulse.calendar._official_bea_events",
+        lambda *_args: [],
+    )
+
+    assert fetch_economic_events(
+        settings,
+        lookback_hours=1,
+        days_ahead=0,
+        store=state,
+    ) == []
+    health = {item["provider"]: item for item in state.provider_health()}
+    assert health["economic_calendar_fallback"]["consecutive_failures"] == 0
+    assert health["economic_calendar"]["consecutive_failures"] == 0
 
 
 def test_non_us_inflation_uses_country_market_axis(monkeypatch, settings):

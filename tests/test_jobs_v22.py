@@ -144,6 +144,23 @@ def test_provider_failure_and_recovery_each_notify_once(tmp_path):
     assert "정상화" in telegram.sent[1][0]
 
 
+def test_internal_calendar_fallback_health_is_silent(tmp_path):
+    state = StateStore(tmp_path / "state.sqlite3")
+    telegram = FakeTelegram()
+    for _ in range(3):
+        state.record_provider_result(
+            "economic_calendar_fallback",
+            success=False,
+            error="timeout",
+        )
+
+    report_provider_health(state, telegram)
+    state.record_provider_result("economic_calendar_fallback", success=True)
+    report_provider_health(state, telegram)
+
+    assert telegram.sent == []
+
+
 def test_tick_idempotency_blocks_duplicate_slot(
     settings,
     monkeypatch,

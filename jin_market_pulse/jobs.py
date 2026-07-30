@@ -311,12 +311,21 @@ def report_provider_health(
         provider = str(item["provider"])
         failures = int(item["consecutive_failures"])
         notified = bool(item["notified"])
+        if provider == "economic_calendar_fallback":
+            if failures == 0 and notified:
+                state.clear_provider_notified(provider)
+            continue
+        provider_label = {
+            "economic_calendar": "경제 캘린더",
+            "bls_calendar": "미국 노동통계국 일정",
+            "bea_calendar": "미국 경제분석국 일정",
+        }.get(provider, provider)
         if failures >= 3 and not notified:
             telegram.send(
                 "\n".join(
                     [
                         "<b>[데이터 공급원 장애]</b>",
-                        f"{html.escape(provider)}가 연속 {failures}회 응답하지 않았습니다.",
+                        f"{html.escape(provider_label)}가 연속 {failures}회 응답하지 않았습니다.",
                         "해당 값은 마지막 정상값을 표시하거나 메시지에서 생략합니다.",
                     ]
                 ),
@@ -325,7 +334,7 @@ def report_provider_health(
             state.mark_provider_notified(provider)
         elif failures == 0 and notified and item["last_error"] == "RECOVERED":
             telegram.send(
-                f"<b>[데이터 공급원 정상화]</b>\n{html.escape(provider)} 응답이 복구됐습니다.",
+                f"<b>[데이터 공급원 정상화]</b>\n{html.escape(provider_label)} 응답이 복구됐습니다.",
                 parse_mode="HTML",
             )
             state.clear_provider_notified(provider)
