@@ -121,11 +121,9 @@ class MarketPulseApp:
         *,
         idempotency_key: str | None = None,
     ) -> str:
-        delivery_key = (
-            f"morning:{idempotency_key}"
-            if idempotency_key
-            else f"morning:{datetime.now(KST):%Y-%m-%d}"
-        )
+        # A morning report is a once-per-KST-date product. Caller-specific keys
+        # must never bypass the daily delivery lock when a backup job runs late.
+        delivery_key = f"morning:{datetime.now(KST):%Y-%m-%d}"
         if not self.state.claim_job(delivery_key, lease_seconds=15 * 60):
             return "duplicate"
         try:

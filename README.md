@@ -9,6 +9,7 @@
 ## 자동으로 오는 메시지
 
 - 매일 `06:50 KST`: 미국장 마감을 포함한 BTC 차트와 모닝 리포트
+- 미국 거래일 개장 약 30분 전: 선물·달러·금리·BTC 또는 5성 일정이 움직인 날만 개장 체크
 - 한국 거래일 `15:50 KST`: 한국장 마감 리포트
 - 유럽 거래일 `18:05 Europe/Paris`: 유럽장 마감 리포트(무음)
 - 중요도 5성 지표: 60~90분 전 사전 알림과 실제 발표 후 결과·시장 반응
@@ -127,7 +128,7 @@ TELEGRAM_WEBHOOK_SECRET
 RUN_MODE=serverless
 RUN_ON_START=false
 STATE_DIR=/data
-ENABLED_REPORTS=morning,korea_close,europe_close
+ENABLED_REPORTS=morning,korea_close,europe_close,us_open
 ENABLE_EVENT_ALERTS=true
 ENABLE_EMERGENCY_ALERTS=true
 BREAKING_ALERT_MODE=balanced
@@ -161,7 +162,8 @@ Secrets에만 저장합니다.
 
 - 웹 서비스: Serverless, 1 Replica, `/data` Volume, 256MB, 0.25 vCPU
 - Cron 서비스: `5,20,35,50 * * * *` UTC, 시작 명령 `python -m jin_market_pulse.cron`
-- GitHub 백업: 매일 `06:58 KST`에 `/jobs/morning` 호출
+- GitHub 모닝 작업: 자동 예약 없음, Railway 장애 복구 시에만 수동 실행
+- 같은 KST 날짜의 모닝 리포트는 호출 경로와 관계없이 한 번만 전송
 - 빌드: Railpack, Python 3.12
 - Healthcheck: `/health`
 

@@ -5,7 +5,7 @@
 1. 웹 서비스는 Telegram 요청과 예약 호출이 있을 때만 깨어납니다.
 2. `market-pulse-cron`이 매시 UTC 5·20·35·50분에 `/jobs/tick`을 호출하고 종료합니다.
 3. tick은 장 마감·모닝·5성 지표·속보·개인 가격 알림과 미처리 웹훅을 점검합니다.
-4. GitHub Actions는 매일 06:58 KST 모닝 백업만 담당합니다.
+4. GitHub Actions 모닝 작업은 자동 예약하지 않고 장애 복구용 수동 실행만 제공합니다.
 
 웹 서비스는 Serverless, 1 Replica, 256MB, 0.25 vCPU, `/data` Volume을
 유지합니다. `RUN_ON_START=false`이므로 재배포 자체가 Telegram 메시지를 만들지 않습니다.

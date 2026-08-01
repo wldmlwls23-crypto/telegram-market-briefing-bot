@@ -49,6 +49,8 @@ def test_morning_sends_chart_before_html_text(
     assert events[0][0] == "photo"
     assert events[0][1] > 1000
     assert events[1] == ("text", "HTML")
+    assert app.send_morning_report(idempotency_key="delayed-github-backup") == "duplicate"
+    assert len(events) == 2
 
 
 def test_chart_failure_does_not_block_text_report(

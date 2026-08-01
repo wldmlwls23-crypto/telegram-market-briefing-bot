@@ -251,6 +251,75 @@ def test_detect_large_moves_uses_30m_and_2h_thresholds(market_data, monkeypatch,
     assert moves[0].percent <= -1.8
 
 
+def test_detect_large_moves_requires_faster_than_recent_usual_move(
+    market_data,
+    monkeypatch,
+    tmp_path,
+):
+    state = StateStore(tmp_path / "state.sqlite3")
+    now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+    quote = market_data.quotes["btc"]
+    quote.current = 101900
+
+    monkeypatch.setattr(
+        state,
+        "latest_market_snapshot",
+        lambda *, before=None: {
+            "captured_at": before.isoformat(),
+            "quotes": {"btc": {"current": 100000}},
+        },
+    )
+    history = []
+    value = 100000.0
+    for index in range(20):
+        history.append(
+            {
+                "captured_at": (now - timedelta(minutes=(20 - index) * 30)).isoformat(),
+                "quotes": {"btc": {"current": value}},
+            }
+        )
+        value *= 1.01
+    monkeypatch.setattr(
+        state,
+        "market_snapshot_history",
+        lambda *, since: history,
+    )
+
+    assert detect_large_moves({"btc": quote}, state, now=now) == []
+
+    quote.current = 103000
+    moves = detect_large_moves({"btc": quote}, state, now=now)
+
+    assert moves
+    assert moves[0].speed_ratio is not None
+    assert moves[0].speed_ratio >= 2.9
+
+
+def test_movement_alert_explains_usual_speed_comparison():
+    move = MarketMove(
+        asset_key="btc",
+        window_minutes=30,
+        before=100000,
+        current=103000,
+        percent=3.0,
+        as_of=datetime.now(timezone.utc),
+        usual_percent=0.8,
+        speed_ratio=3.75,
+        trigger_percent=1.8,
+    )
+
+    text = render_breaking_alert(
+        analysis=None,
+        group=None,
+        moves=[move],
+        verification_level="가격 데이터만 확인",
+        movement_only=True,
+    )
+
+    assert "최근 7일 평소" in text
+    assert "3.8배 속도" in text
+
+
 def test_movement_only_alert_promises_update_not_guess():
     move = MarketMove(
         asset_key="btc",
@@ -351,11 +420,13 @@ def test_close_and_overnight_settings_are_independent(settings, tmp_path):
 
     handle_market_query("한국 마감 알림 꺼줘", settings, store)
     handle_market_query("유럽 마감 알림 꺼줘", settings, store)
+    handle_market_query("미국장 시작 알림 꺼줘", settings, store)
     handle_market_query("새벽 무음 해제", settings, store)
     prefs = store.preferences(settings.telegram_chat_id)
 
     assert prefs["korea_close_reports"] is False
     assert prefs["europe_close_reports"] is False
+    assert prefs["us_open_reports"] is False
     assert prefs["overnight_silent"] is False
 
 

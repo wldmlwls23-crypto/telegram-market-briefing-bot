@@ -569,6 +569,29 @@ class StateStore:
             "quotes": self._loads(row["quotes_json"], {}),
         }
 
+    def market_snapshot_history(
+        self,
+        *,
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT captured_at, quotes_json
+                FROM market_snapshots
+                WHERE captured_at>=?
+                ORDER BY captured_at ASC
+                """,
+                (since.astimezone(UTC).isoformat(),),
+            ).fetchall()
+        return [
+            {
+                "captured_at": row["captured_at"],
+                "quotes": self._loads(row["quotes_json"], {}),
+            }
+            for row in rows
+        ]
+
     def claim_telegram_update(
         self,
         update_id: int,
@@ -969,6 +992,7 @@ class StateStore:
             "event_alerts": True,
             "korea_close_reports": True,
             "europe_close_reports": True,
+            "us_open_reports": True,
             "europe_silent": True,
             "overnight_silent": True,
             "muted_until": "",

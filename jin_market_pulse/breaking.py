@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -68,6 +69,9 @@ class MarketMove:
     current: float
     percent: float
     as_of: datetime
+    usual_percent: float | None = None
+    speed_ratio: float | None = None
+    trigger_percent: float | None = None
 
 
 def _publisher_ko(value: str) -> str:
@@ -91,6 +95,7 @@ def _snapshot_move(
     snapshot: dict[str, Any],
     *,
     window_minutes: int,
+    now: datetime,
 ) -> MarketMove | None:
     old = (snapshot.get("quotes") or {}).get(quote.key)
     if not old:
@@ -100,7 +105,7 @@ def _snapshot_move(
         captured = datetime.fromisoformat(str(snapshot["captured_at"]))
     except (KeyError, TypeError, ValueError):
         return None
-    target = datetime.now(UTC) - timedelta(minutes=window_minutes)
+    target = now - timedelta(minutes=window_minutes)
     tolerance = timedelta(minutes=25 if window_minutes == 30 else 75)
     if abs(captured.astimezone(UTC) - target) > tolerance or before == 0:
         return None
@@ -115,26 +120,131 @@ def _snapshot_move(
     )
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _historical_moves(
+    history: list[dict[str, Any]],
+    asset_key: str,
+    window_minutes: int,
+) -> list[float]:
+    points: list[tuple[datetime, float]] = []
+    for snapshot in history:
+        raw = (snapshot.get("quotes") or {}).get(asset_key)
+        if not raw:
+            continue
+        try:
+            captured = datetime.fromisoformat(str(snapshot["captured_at"])).astimezone(UTC)
+            value = float(raw["current"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value > 0:
+            points.append((captured, value))
+    samples: list[float] = []
+    tolerance = timedelta(minutes=20 if window_minutes == 30 else 45)
+    start_index = 0
+    for end_index, (end_time, end_value) in enumerate(points):
+        target = end_time - timedelta(minutes=window_minutes)
+        while start_index + 1 < end_index and points[start_index + 1][0] <= target:
+            start_index += 1
+        candidates = points[max(0, start_index - 1):min(end_index, start_index + 2)]
+        if not candidates:
+            continue
+        start_time, start_value = min(
+            candidates,
+            key=lambda item: abs(item[0] - target),
+        )
+        if abs(start_time - target) > tolerance or start_value == 0:
+            continue
+        change = abs((end_value - start_value) / start_value * 100)
+        if change >= 0.005:
+            samples.append(change)
+    return samples
+
+
+def _adaptive_trigger(
+    history: list[dict[str, Any]],
+    asset_key: str,
+    window_minutes: int,
+    fixed_limit: float,
+) -> tuple[float, float | None]:
+    samples = _historical_moves(history, asset_key, window_minutes)
+    if len(samples) < 12:
+        return fixed_limit, None
+    usual = max(statistics.median(samples), _percentile(samples, 0.75))
+    multiplier = 2.25 if window_minutes == 30 else 2.0
+    return max(fixed_limit, usual * multiplier), usual
+
+
 def detect_large_moves(
     quotes: dict[str, AssetQuote],
     state: StateStore,
+    *,
+    now: datetime | None = None,
 ) -> list[MarketMove]:
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
     snapshots = {
         30: state.latest_market_snapshot(
-            before=datetime.now(UTC) - timedelta(minutes=30)
+            before=current_time - timedelta(minutes=30)
         ),
         120: state.latest_market_snapshot(
-            before=datetime.now(UTC) - timedelta(minutes=120)
+            before=current_time - timedelta(minutes=120)
         ),
     }
+    history = state.market_snapshot_history(
+        since=current_time - timedelta(days=7)
+    )
     detected: list[MarketMove] = []
     for key, (short_limit, long_limit) in MOVE_THRESHOLDS.items():
         quote = quotes.get(key)
         if not quote or quote.stale or not quote.verified:
             continue
+        short_move = _snapshot_move(
+            quote,
+            snapshots[30],
+            window_minutes=30,
+            now=current_time,
+        )
+        short_trigger, short_usual = _adaptive_trigger(
+            history,
+            key,
+            30,
+            short_limit,
+        )
         for window, limit in ((30, short_limit), (120, long_limit)):
-            move = _snapshot_move(quote, snapshots[window], window_minutes=window)
-            if move and abs(move.percent) >= limit:
+            move = (
+                short_move
+                if window == 30
+                else _snapshot_move(
+                    quote,
+                    snapshots[window],
+                    window_minutes=window,
+                    now=current_time,
+                )
+            )
+            trigger, usual = (
+                (short_trigger, short_usual)
+                if window == 30
+                else _adaptive_trigger(history, key, 120, limit)
+            )
+            accelerated = True
+            if window == 120 and short_move:
+                recent_floor = max(short_limit * 0.5, (short_usual or 0) * 1.5)
+                accelerated = abs(short_move.percent) >= recent_floor
+            elif window == 120:
+                accelerated = False
+            if move and abs(move.percent) >= trigger and accelerated:
+                move.usual_percent = usual
+                move.speed_ratio = abs(move.percent) / usual if usual else None
+                move.trigger_percent = trigger
                 detected.append(move)
                 break
     return sorted(detected, key=lambda item: abs(item.percent), reverse=True)
@@ -228,6 +338,11 @@ def _move_lines(moves: list[MarketMove]) -> list[str]:
             f"<b>{_format_price(move.asset_key, move.current)}</b> "
             f"{arrow}{abs(move.percent):.2f}% · {move.window_minutes}분"
         )
+        if move.speed_ratio is not None and move.usual_percent is not None:
+            lines.append(
+                f"  최근 7일 평소 {move.window_minutes}분 변동 "
+                f"{move.usual_percent:.2f}%의 <b>{move.speed_ratio:.1f}배 속도</b>"
+            )
     return lines
 
 

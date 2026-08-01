@@ -31,7 +31,7 @@ MAIN_KEYBOARD = {
 REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 BOT_COMMANDS = [
-    {"command": "start", "description": "처음 화면과 빠른 버튼"},
+    {"command": "start", "description": "처음 화면과 질문 안내"},
     {"command": "menu", "description": "빠른 버튼 열기"},
     {"command": "brief", "description": "모닝 리포트 다시 보기"},
     {"command": "price", "description": "자산 가격 조회"},

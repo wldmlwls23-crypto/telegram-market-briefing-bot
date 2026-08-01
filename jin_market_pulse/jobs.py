@@ -20,7 +20,8 @@ from .links import explain_news_link, first_https_url
 from .providers import fetch_asset_quote, fetch_market_quotes
 from .session_reports import report_due, send_session_report
 from .state import StateStore
-from .telegram import MAIN_KEYBOARD, TelegramClient
+from .telegram import TelegramClient
+from .us_open import send_us_open_preview, us_open_preview_due
 
 
 def _allowed_chat(payload: dict[str, Any], settings: Settings) -> bool:
@@ -370,6 +371,15 @@ def run_tick(
             and 45 <= now.minute <= 59
         ):
             result["morning"] = MarketPulseApp(settings).send_morning_report()
+
+        if (
+            "us_open" in settings.enabled_reports
+            and prefs.get("us_open_reports", True)
+            and not muted
+            and us_open_preview_due(now)
+        ):
+            preview = send_us_open_preview(settings, state, telegram, now=now)
+            result["us_open"] = preview.status
 
         for report_type, preference in (
             ("korea_close", "korea_close_reports"),

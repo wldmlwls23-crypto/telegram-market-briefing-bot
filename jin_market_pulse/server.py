@@ -9,18 +9,13 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, st
 from fastapi.concurrency import run_in_threadpool
 
 from .app import MarketPulseApp, setup_logging
-from .bot_queries import (
-    _candidate_response,
-    answer_market_query,
-    handle_market_query,
-    route_query,
-)
+from .bot_queries import handle_market_query
 from .config import Settings
 from .jobs import process_telegram_update, run_tick
 from .links import first_https_url
 from .session_reports import REPORT_TYPES, send_session_report
 from .state import StateStore
-from .telegram import MAIN_KEYBOARD, TelegramClient
+from .telegram import TelegramClient
 
 
 def _authorized(value: str | None, secret: str) -> bool:
@@ -77,45 +72,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     and not first_https_url(text)
                 )
                 if simple_text:
-                    route = route_query(
+                    response = handle_market_query(
                         text,
-                        store.get_chat_context(job_settings.telegram_chat_id),
+                        job_settings,
+                        store,
                     )
-                    response = (
-                        handle_market_query(text, job_settings, store)
-                        if route.intent == "last"
-                        else None
+                    telegram.send(
+                        response.text,
+                        parse_mode=response.parse_mode,
+                        reply_markup=response.reply_markup,
                     )
-                    answer = (
-                        response.text
-                        if response
-                        else answer_market_query(
-                            text,
-                            job_settings,
-                            store,
-                        )
-                    )
-                    if route.candidates:
-                        candidate = _candidate_response(route.candidates)
-                        telegram.send(
-                            answer,
-                            parse_mode="HTML",
-                            reply_markup=candidate.reply_markup,
-                        )
-                    elif route.intent in {"start", "menu", "help"}:
-                        telegram.send(
-                            answer,
-                            parse_mode="HTML",
-                            reply_markup=MAIN_KEYBOARD,
-                        )
-                    elif response:
-                        telegram.send(
-                            answer,
-                            parse_mode=response.parse_mode,
-                            reply_markup=response.reply_markup,
-                        )
-                    else:
-                        telegram.send(answer, parse_mode="HTML")
                 else:
                     process_telegram_update(
                         payload,
