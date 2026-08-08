@@ -35,7 +35,7 @@ from .reports import (
 )
 from .state import StateStore
 from .session_reports import send_session_report
-from .telegram import TelegramClient
+from .telegram import TelegramClient, feedback_keyboard
 
 
 def _redact(value: object) -> object:
@@ -95,6 +95,13 @@ class MarketPulseApp:
             store=self.state,
         )
         recent_facts = self.state.recent_report_facts(hours=18)
+        preferences = self.state.preferences(self.settings.telegram_chat_id)
+        watch_items = self.state.watchlist(self.settings.telegram_chat_id)
+        focus_keys = [
+            str(preferences.get("focus_asset") or ""),
+            *(str(item["asset_key"]) for item in watch_items),
+        ]
+        focus_keys = list(dict.fromkeys(key for key in focus_keys if key))[:8]
         news = [
             item
             for item in fetch_news()
@@ -114,6 +121,8 @@ class MarketPulseApp:
             news=news,
             btc_series=btc_series,
             errors=errors,
+            focus_asset_keys=focus_keys,
+            recent_report_facts=recent_facts,
         )
 
     def send_morning_report(
@@ -165,6 +174,7 @@ class MarketPulseApp:
                 message_ids = self.telegram.send(
                     report,
                     parse_mode="HTML",
+                    reply_markup=feedback_keyboard("morning"),
                 )
                 text_message_id = message_ids[0] if message_ids else None
                 self.state.mark_delivery(
@@ -221,6 +231,11 @@ class MarketPulseApp:
                 text=report,
                 facts=report_facts,
                 telegram_message_id=text_message_id,
+            )
+            self.state.record_quality_event(
+                "report:morning",
+                "sent",
+                metrics={"characters": len(report), "signals": len(analysis.signals)},
             )
             tracked_at = datetime.now(KST).isoformat()
             for event in select_future_events(data):

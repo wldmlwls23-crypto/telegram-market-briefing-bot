@@ -56,6 +56,7 @@ class Settings:
     openai_max_output_tokens: int = 2500
     breaking_alert_mode: str = "balanced"
     auto_ai_daily_limit: int = 6
+    v3_shadow_mode: bool = True
 
     @property
     def state_file(self) -> Path:
@@ -119,4 +120,5 @@ class Settings:
                 "BREAKING_ALERT_MODE", "balanced"
             ).strip().lower(),
             auto_ai_daily_limit=int(os.getenv("AUTO_AI_DAILY_LIMIT", "6")),
+            v3_shadow_mode=env_bool("V3_SHADOW_MODE", True),
         )

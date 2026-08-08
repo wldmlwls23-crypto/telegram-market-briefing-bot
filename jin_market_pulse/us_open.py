@@ -10,7 +10,7 @@ from .config import KST, NEW_YORK, Settings
 from .models import AssetQuote, EconomicEvent
 from .providers import fetch_asset_quote
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import TelegramClient, feedback_keyboard
 
 
 US_OPEN_TARGET = time(9, 0)
@@ -305,7 +305,11 @@ def send_us_open_preview(
         result.status = "duplicate"
         return result
     try:
-        message_ids = telegram.send(result.text, parse_mode="HTML")
+        message_ids = telegram.send(
+            result.text,
+            parse_mode="HTML",
+            reply_markup=feedback_keyboard("us_open"),
+        )
         result.telegram_message_id = message_ids[0] if message_ids else None
         result.status = "sent"
         state.record_report_run(
@@ -315,6 +319,11 @@ def send_us_open_preview(
             "sent",
             text=result.text,
             telegram_message_id=result.telegram_message_id,
+        )
+        state.record_quality_event(
+            "report:us_open",
+            "sent",
+            metrics={"characters": len(result.text)},
         )
         state.save_message(result.report_key, result.text, parse_mode="HTML")
         state.finish_job(result.report_key, success=True)

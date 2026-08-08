@@ -42,7 +42,7 @@ def test_morning_sends_chart_before_html_text(
     monkeypatch.setattr(
         app.telegram,
         "send",
-        lambda text, parse_mode=None: events.append(("text", parse_mode)),
+        lambda text, parse_mode=None, **_kwargs: events.append(("text", parse_mode)),
     )
 
     assert app.send_morning_report() == "sent"
@@ -71,7 +71,7 @@ def test_chart_failure_does_not_block_text_report(
     monkeypatch.setattr(
         app.telegram,
         "send",
-        lambda text, parse_mode=None: sent.append(parse_mode),
+        lambda text, parse_mode=None, **_kwargs: sent.append(parse_mode),
     )
 
     assert app.send_morning_report() == "sent"

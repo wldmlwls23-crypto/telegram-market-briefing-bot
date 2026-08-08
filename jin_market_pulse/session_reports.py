@@ -18,7 +18,7 @@ from .providers import (
     verify_outlier_directions,
 )
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import TelegramClient, feedback_keyboard
 
 
 REPORT_LIMIT = 1200
@@ -568,6 +568,7 @@ def send_session_report(
             result.text,
             parse_mode="HTML",
             disable_notification=bool(spec["silent"]),
+            reply_markup=feedback_keyboard(report_type),
         )
         result.telegram_message_id = message_ids[0] if message_ids else None
         result.status = "sent"
@@ -580,6 +581,11 @@ def send_session_report(
             facts=result.facts,
             telegram_message_id=result.telegram_message_id,
             skip_reason=result.skip_reason,
+        )
+        state.record_quality_event(
+            f"report:{report_type}",
+            "sent",
+            metrics={"characters": len(result.text), "facts": len(result.facts)},
         )
         state.save_message(
             f"{report_type}:{result.session_date}",

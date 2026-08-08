@@ -114,6 +114,8 @@ class MarketData(BaseModel):
     news: list[NewsItem]
     btc_series: "PriceSeries | None" = None
     errors: list[str] = Field(default_factory=list)
+    focus_asset_keys: list[str] = Field(default_factory=list, max_length=8)
+    recent_report_facts: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class PricePoint(BaseModel):

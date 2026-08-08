@@ -43,10 +43,27 @@ BOT_COMMANDS = [
     {"command": "alerts", "description": "내 가격 알림 관리"},
     {"command": "mute", "description": "자동 알림 잠시 끄기"},
     {"command": "settings", "description": "알림 설정"},
+    {"command": "watchlist", "description": "관심 자산 관리"},
+    {"command": "focus", "description": "우선 관찰 자산 지정"},
+    {"command": "quality", "description": "최근 데이터와 알림 품질"},
+    {"command": "review", "description": "최근 보고 요약 점검"},
     {"command": "status", "description": "봇과 데이터 상태"},
     {"command": "reset", "description": "최근 대화 연결만 초기화"},
     {"command": "help", "description": "질문 예시와 사용법"},
 ]
+
+
+def feedback_keyboard(source_type: str) -> dict[str, Any]:
+    safe_source = re.sub(r"[^a-z0-9_-]", "", source_type.lower())[:20] or "message"
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "유용해요", "callback_data": f"fb:{safe_source}:useful"},
+                {"text": "불필요해요", "callback_data": f"fb:{safe_source}:noise"},
+                {"text": "늦었어요", "callback_data": f"fb:{safe_source}:late"},
+            ]
+        ]
+    }
 
 
 def _plain_from_html(value: str) -> str:

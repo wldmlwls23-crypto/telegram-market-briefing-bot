@@ -13,7 +13,7 @@ from .news import breaking_groups, fetch_news
 from .providers import fetch_market_quotes
 from .reports import create_emergency_analysis
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import TelegramClient, feedback_keyboard
 
 
 UTC = timezone.utc
@@ -72,6 +72,11 @@ class MarketMove:
     usual_percent: float | None = None
     speed_ratio: float | None = None
     trigger_percent: float | None = None
+    baseline_samples: int = 0
+    anomaly_score: float | None = None
+    session_bucket: str = ""
+    cross_asset_count: int = 0
+    confidence: str = "낮음"
 
 
 def _publisher_ko(value: str) -> str:
@@ -135,6 +140,8 @@ def _historical_moves(
     history: list[dict[str, Any]],
     asset_key: str,
     window_minutes: int,
+    *,
+    session_bucket: str = "",
 ) -> list[float]:
     points: list[tuple[datetime, float]] = []
     for snapshot in history:
@@ -152,6 +159,8 @@ def _historical_moves(
     tolerance = timedelta(minutes=20 if window_minutes == 30 else 45)
     start_index = 0
     for end_index, (end_time, end_value) in enumerate(points):
+        if session_bucket and _session_bucket(end_time, asset_key) != session_bucket:
+            continue
         target = end_time - timedelta(minutes=window_minutes)
         while start_index + 1 < end_index and points[start_index + 1][0] <= target:
             start_index += 1
@@ -170,18 +179,38 @@ def _historical_moves(
     return samples
 
 
+def _session_bucket(value: datetime, asset_key: str) -> str:
+    local = value.astimezone(KST)
+    if asset_key in {"kospi", "kosdaq", "usdkrw"} and 9 <= local.hour < 16:
+        return "korea_regular"
+    if 22 <= local.hour or local.hour < 6:
+        return "us_session"
+    if 16 <= local.hour < 22:
+        return "europe_session"
+    return "asia_offhours"
+
+
 def _adaptive_trigger(
     history: list[dict[str, Any]],
     asset_key: str,
     window_minutes: int,
     fixed_limit: float,
-) -> tuple[float, float | None]:
-    samples = _historical_moves(history, asset_key, window_minutes)
-    if len(samples) < 12:
-        return fixed_limit, None
+    *,
+    session_bucket: str = "",
+) -> tuple[float, float | None, int]:
+    samples = _historical_moves(
+        history,
+        asset_key,
+        window_minutes,
+        session_bucket=session_bucket,
+    )
+    if len(samples) < 8:
+        return fixed_limit, None, len(samples)
     usual = max(statistics.median(samples), _percentile(samples, 0.75))
     multiplier = 2.25 if window_minutes == 30 else 2.0
-    return max(fixed_limit, usual * multiplier), usual
+    adaptive = usual * multiplier
+    trigger = max(fixed_limit * 0.7, min(fixed_limit * 1.5, adaptive))
+    return trigger, usual, len(samples)
 
 
 def detect_large_moves(
@@ -189,6 +218,7 @@ def detect_large_moves(
     state: StateStore,
     *,
     now: datetime | None = None,
+    shadow_mode: bool = False,
 ) -> list[MarketMove]:
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
     snapshots = {
@@ -203,6 +233,7 @@ def detect_large_moves(
         since=current_time - timedelta(days=7)
     )
     detected: list[MarketMove] = []
+    feedback_factor = float(state.feedback_summary(days=30)["sensitivity_factor"])
     for key, (short_limit, long_limit) in MOVE_THRESHOLDS.items():
         quote = quotes.get(key)
         if (
@@ -219,11 +250,15 @@ def detect_large_moves(
             window_minutes=30,
             now=current_time,
         )
-        short_trigger, short_usual = _adaptive_trigger(
+        bucket = _session_bucket(current_time, key)
+        short_limit *= feedback_factor
+        long_limit *= feedback_factor
+        short_trigger, short_usual, short_samples = _adaptive_trigger(
             history,
             key,
             30,
             short_limit,
+            session_bucket=bucket,
         )
         for window, limit in ((30, short_limit), (120, long_limit)):
             move = (
@@ -236,11 +271,19 @@ def detect_large_moves(
                     now=current_time,
                 )
             )
-            trigger, usual = (
-                (short_trigger, short_usual)
+            trigger, usual, sample_count = (
+                (short_trigger, short_usual, short_samples)
                 if window == 30
-                else _adaptive_trigger(history, key, 120, limit)
+                else _adaptive_trigger(
+                    history,
+                    key,
+                    120,
+                    limit,
+                    session_bucket=bucket,
+                )
             )
+            if shadow_mode:
+                trigger = max(trigger, limit)
             accelerated = True
             if window == 120 and short_move:
                 recent_floor = max(short_limit * 0.5, (short_usual or 0) * 1.5)
@@ -251,9 +294,30 @@ def detect_large_moves(
                 move.usual_percent = usual
                 move.speed_ratio = abs(move.percent) / usual if usual else None
                 move.trigger_percent = trigger
+                move.baseline_samples = sample_count
+                move.anomaly_score = max(
+                    abs(move.percent) / trigger,
+                    move.speed_ratio or 0.0,
+                )
+                move.session_bucket = bucket
                 detected.append(move)
                 break
-    return sorted(detected, key=lambda item: abs(item.percent), reverse=True)
+    for move in detected:
+        move.cross_asset_count = sum(
+            1
+            for peer in detected
+            if peer.asset_key != move.asset_key
+            and (peer.percent > 0) == (move.percent > 0)
+        )
+        if (move.anomaly_score or 0) >= 3 and move.cross_asset_count:
+            move.confidence = "높음"
+        elif (move.anomaly_score or 0) >= 1.5 or move.cross_asset_count:
+            move.confidence = "중간"
+    return sorted(
+        detected,
+        key=lambda item: (item.anomaly_score or 0, abs(item.percent)),
+        reverse=True,
+    )
 
 
 def _group_assets(group: list[NewsItem]) -> set[str]:
@@ -349,6 +413,15 @@ def _move_lines(moves: list[MarketMove]) -> list[str]:
                 f"  최근 7일 평소 {move.window_minutes}분 변동 "
                 f"{move.usual_percent:.2f}%의 <b>{move.speed_ratio:.1f}배 속도</b>"
             )
+        if move.anomaly_score is not None:
+            cross = (
+                f" · 같은 방향 교차 자산 {move.cross_asset_count}개"
+                if move.cross_asset_count
+                else ""
+            )
+            lines.append(
+                f"  이상도 {move.anomaly_score:.1f} · 신뢰도 {move.confidence}{cross}"
+            )
     return lines
 
 
@@ -392,7 +465,7 @@ def render_breaking_alert(
             ]
         )
     else:
-        label = "확인된 원인" if verification_level == "공식 발표" else "가능한 배경"
+        label = "확인된 원인" if verification_level == "공식 발표" else "강한 원인 후보"
         lines.append(
             f"• {label}: {html.escape(analysis.meaning if analysis else '')}"
         )
@@ -524,6 +597,7 @@ def _send_or_update_news(
         text,
         parse_mode="HTML",
         disable_notification=disable_notification,
+        reply_markup=feedback_keyboard("breaking"),
     )
     state.mark_alert(
         topic,
@@ -604,7 +678,11 @@ def monitor_breaking_alerts(
     if check_prices or groups or state.pending_alerts():
         quotes, _ = fetch_market_quotes(settings, state)
     if check_prices and quotes:
-        moves = detect_large_moves(quotes, state)
+        moves = detect_large_moves(
+            quotes,
+            state,
+            shadow_mode=settings.v3_shadow_mode,
+        )
 
     sent = 0
     updated = _update_pending_causes(
@@ -651,6 +729,7 @@ def monitor_breaking_alerts(
                 text,
                 parse_mode="HTML",
                 disable_notification=disable_notification,
+                reply_markup=feedback_keyboard("move"),
             )
             state.mark_alert(
                 topic,
@@ -678,6 +757,20 @@ def monitor_breaking_alerts(
             "large_moves": len(moves),
             "sent": sent,
             "updated": updated,
+            "v3_shadow_mode": settings.v3_shadow_mode,
+            "feedback_sensitivity": state.feedback_summary(days=30)[
+                "sensitivity_factor"
+            ],
+        },
+    )
+    state.record_quality_event(
+        "breaking_scan",
+        "sent" if sent else "quiet",
+        metrics={
+            "news_candidates": len(groups),
+            "large_moves": len(moves),
+            "updated": updated,
+            "shadow": settings.v3_shadow_mode,
         },
     )
     return {

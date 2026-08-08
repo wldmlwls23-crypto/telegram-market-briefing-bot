@@ -51,7 +51,7 @@ def _news(
     )
 
 
-def test_schema_v3_and_report_state_persist(tmp_path):
+def test_schema_v4_and_report_state_persist(tmp_path):
     state = StateStore(tmp_path / "state.sqlite3")
     state.record_report_run(
         "korea_close:2026-07-29",
@@ -69,7 +69,7 @@ def test_schema_v3_and_report_state_persist(tmp_path):
         ],
     )
 
-    assert state.readiness()["schema_version"] == 3
+    assert state.readiness()["schema_version"] == 4
     assert state.latest_report_run("korea_close")["text"] == "report"
     assert state.recent_report_facts()["asset:v2:kospi"]["direction"] == -1
 

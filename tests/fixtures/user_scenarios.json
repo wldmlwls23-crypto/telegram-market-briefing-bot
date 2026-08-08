@@ -149,5 +149,13 @@
   {"id": 148, "text": "이거 왜 이래", "intent": "follow_up", "context": {"asset_key": "kospi"}},
   {"id": 149, "text": "뭘 물어봐", "intent": "help"},
   {"id": 150, "text": "안녕하세요", "intent": "unknown"},
-  {"id": 151, "text": "/menu", "intent": "menu"}
+  {"id": 151, "text": "/menu", "intent": "menu"},
+  {"id": 152, "text": "관심 자산에 비트 추가", "intent": "watchlist", "assets": ["btc"]},
+  {"id": 153, "text": "관심에서 금 빼줘", "intent": "watchlist", "assets": ["gold"]},
+  {"id": 154, "text": "/focus 코스피", "intent": "focus", "assets": ["kospi"]},
+  {"id": 155, "text": "비트를 우선 관찰해줘", "intent": "focus", "assets": ["btc"]},
+  {"id": 156, "text": "데이터 품질 보여줘", "intent": "quality"},
+  {"id": 157, "text": "최근 보고 점검", "intent": "review"},
+  {"id": 158, "text": "/quality", "intent": "quality"},
+  {"id": 159, "text": "/review", "intent": "review"}
 ]

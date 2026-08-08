@@ -13,7 +13,7 @@ from .news import emergency_groups, fetch_news
 from .providers import fetch_market_quotes
 from .reports import create_emergency_analysis, render_emergency_alert
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import TelegramClient, feedback_keyboard
 
 
 PRE_EVENT_MINUTES_MIN = 60
@@ -99,6 +99,7 @@ def send_due_pre_event_reminders(
         message_ids = telegram.send(
             render_pre_event_reminder(group),
             parse_mode="HTML",
+            reply_markup=feedback_keyboard("event"),
         )
         for event in group:
             state.update_event(
@@ -174,6 +175,8 @@ def render_event_result(
     event_or_events: EconomicEvent | list[EconomicEvent],
     before_snapshot: dict[str, dict[str, object]],
     quotes: dict[str, AssetQuote],
+    *,
+    reaction_stage: str = "발표 직후",
 ) -> str:
     events = _as_events(event_or_events)
     first = events[0]
@@ -202,9 +205,33 @@ def render_event_result(
             )
         lines.append(f"출처: {html.escape(event.source)}")
     reaction = _reaction_lines(before_snapshot, quotes)
-    if reaction:
-        lines.extend(["", "<b>발표 전후 시장 반응:</b>", *reaction])
+    lines.extend(
+        [
+            "",
+            f"<b>발표 전후 시장 반응:</b> · {html.escape(reaction_stage)}",
+            *(reaction or ["• 검증 가능한 반응 값이 없어 숫자는 생략했습니다."]),
+        ]
+    )
     return "\n".join(lines)
+
+
+def _reaction_stage_due(
+    records: dict[str, dict[str, object]],
+    event_time: datetime,
+    now: datetime,
+) -> tuple[str, str] | None:
+    elapsed = now - event_time
+    if elapsed >= timedelta(minutes=60) and any(
+        record.get("result_sent_at") and not record.get("reaction_60m_at")
+        for record in records.values()
+    ):
+        return "60분 후", "reaction_60m_at"
+    if elapsed >= timedelta(minutes=15) and any(
+        record.get("result_sent_at") and not record.get("reaction_15m_at")
+        for record in records.values()
+    ):
+        return "15분 후", "reaction_15m_at"
+    return None
 
 
 def _numeric_result(value: str) -> float | None:
@@ -283,15 +310,22 @@ def send_due_event_results(
             and records[event.event_id].get("actual")
             and records[event.event_id].get("actual") != event.actual
         ]
+        reaction_stage = _reaction_stage_due(
+            records,
+            group[0].event_time_kst,
+            now,
+        )
         if not unsent:
             # Correct prior messages only when the published number changed.
-            if not changed:
+            if not changed and not reaction_stage:
                 continue
             message_id = next(
                 (
                     records[event.event_id].get("result_message_id")
+                    or records[event.event_id].get("pre_alert_message_id")
                     for event in group
                     if records[event.event_id].get("result_message_id")
+                    or records[event.event_id].get("pre_alert_message_id")
                 ),
                 None,
             )
@@ -307,12 +341,62 @@ def send_due_event_results(
                 )
                 edited = telegram.edit(
                     int(message_id),
-                    render_event_result(group, before, quotes),
+                    render_event_result(
+                        group,
+                        before,
+                        quotes,
+                        reaction_stage=(reaction_stage or ("정정", ""))[0],
+                    ),
                 )
                 if edited:
                     for event in changed:
                         state.update_event(event.event_id, actual=event.actual)
-                    delivered += len(changed)
+                    if reaction_stage:
+                        _, stage_field = reaction_stage
+                        for event in group:
+                            stage_values = {
+                                stage_field: now.isoformat(),
+                                "stage": stage_field,
+                            }
+                            if stage_field == "reaction_60m_at":
+                                stage_values["reaction_15m_at"] = now.isoformat()
+                            state.update_event(event.event_id, **stage_values)
+                    delivered += max(len(changed), 1 if reaction_stage else 0)
+            else:
+                quotes, _ = fetch_market_quotes(settings, state)
+                before = next(
+                    (
+                        records[event.event_id].get("before_snapshot")
+                        for event in group
+                        if records[event.event_id].get("before_snapshot")
+                    ),
+                    {},
+                )
+                message_ids = telegram.send(
+                    render_event_result(
+                        group,
+                        before,
+                        quotes,
+                        reaction_stage=(reaction_stage or ("정정", ""))[0],
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=feedback_keyboard("event"),
+                )
+                new_message_id = message_ids[0] if message_ids else None
+                for event in group:
+                    values: dict[str, object] = {
+                        "result_message_id": new_message_id,
+                    }
+                    if event in changed:
+                        values["actual"] = event.actual
+                    if reaction_stage:
+                        _, stage_field = reaction_stage
+                        values[stage_field] = now.isoformat()
+                        values["stage"] = stage_field
+                        if stage_field == "reaction_60m_at":
+                            values["reaction_15m_at"] = now.isoformat()
+                    state.update_event(event.event_id, **values)
+                delivered += max(len(changed), 1 if reaction_stage else 0)
             continue
         quotes, _ = fetch_market_quotes(settings, state)
         before = next(
@@ -326,15 +410,22 @@ def send_due_event_results(
         existing_message_id = next(
             (
                 records[event.event_id].get("result_message_id")
+                or records[event.event_id].get("pre_alert_message_id")
                 for event in group
                 if records[event.event_id].get("result_message_id")
+                or records[event.event_id].get("pre_alert_message_id")
             ),
             None,
         )
         if existing_message_id:
             edited = telegram.edit(
                 int(existing_message_id),
-                render_event_result(group, before, quotes),
+                render_event_result(
+                    group,
+                    before,
+                    quotes,
+                    reaction_stage="발표 직후",
+                ),
             )
             if edited:
                 message_ids = [int(existing_message_id)]
@@ -342,13 +433,25 @@ def send_due_event_results(
                     state.update_event(event.event_id, actual=event.actual)
             else:
                 message_ids = telegram.send(
-                    render_event_result(group, before, quotes),
+                    render_event_result(
+                        group,
+                        before,
+                        quotes,
+                        reaction_stage="발표 직후",
+                    ),
                     parse_mode="HTML",
+                    reply_markup=feedback_keyboard("event"),
                 )
         else:
             message_ids = telegram.send(
-                render_event_result(group, before, quotes),
+                render_event_result(
+                    group,
+                    before,
+                    quotes,
+                    reaction_stage="발표 직후",
+                ),
                 parse_mode="HTML",
+                reply_markup=feedback_keyboard("event"),
             )
         for event in unsent:
             state.update_event(

@@ -14,7 +14,7 @@ from .models import AssetQuote
 
 
 UTC = timezone.utc
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StateStore:
@@ -192,6 +192,38 @@ class StateStore:
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    chat_id TEXT NOT NULL,
+                    asset_key TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, asset_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_watchlist_chat_priority
+                    ON watchlist(chat_id, priority DESC, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS message_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    telegram_message_id INTEGER NOT NULL,
+                    topic_key TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(chat_id, telegram_message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_feedback_created
+                    ON message_feedback(created_at DESC);
+                CREATE TABLE IF NOT EXISTS quality_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_quality_events_created
+                    ON quality_events(created_at DESC);
                 """
             )
             alert_columns = {
@@ -1034,6 +1066,175 @@ class StateStore:
                 ),
             )
         return payload
+
+    def watchlist(self, chat_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT asset_key, priority, created_at, updated_at
+                FROM watchlist
+                WHERE chat_id=?
+                ORDER BY priority DESC, updated_at DESC, asset_key
+                """,
+                (str(chat_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_watch_asset(
+        self,
+        chat_id: str,
+        asset_key: str,
+        *,
+        priority: int = 1,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect(write=True) as db:
+            db.execute(
+                """
+                INSERT INTO watchlist(
+                    chat_id, asset_key, priority, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, asset_key) DO UPDATE SET
+                    priority=excluded.priority,
+                    updated_at=excluded.updated_at
+                """,
+                (str(chat_id), asset_key, max(1, min(priority, 3)), now, now),
+            )
+
+    def remove_watch_asset(self, chat_id: str, asset_key: str) -> bool:
+        with self._connect(write=True) as db:
+            cursor = db.execute(
+                "DELETE FROM watchlist WHERE chat_id=? AND asset_key=?",
+                (str(chat_id), asset_key),
+            )
+        return cursor.rowcount == 1
+
+    def record_feedback(
+        self,
+        chat_id: str,
+        telegram_message_id: int,
+        topic_key: str,
+        source_type: str,
+        rating: str,
+    ) -> None:
+        if rating not in {"useful", "noise", "late"}:
+            raise ValueError("Unsupported feedback rating")
+        with self._connect(write=True) as db:
+            db.execute(
+                """
+                INSERT INTO message_feedback(
+                    chat_id, telegram_message_id, topic_key,
+                    source_type, rating, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, telegram_message_id) DO UPDATE SET
+                    topic_key=excluded.topic_key,
+                    source_type=excluded.source_type,
+                    rating=excluded.rating,
+                    created_at=excluded.created_at
+                """,
+                (
+                    str(chat_id),
+                    int(telegram_message_id),
+                    topic_key[:160],
+                    source_type[:40],
+                    rating,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def feedback_summary(self, *, days: int = 30) -> dict[str, Any]:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT rating, COUNT(*) AS count
+                FROM message_feedback
+                WHERE created_at>=?
+                GROUP BY rating
+                """,
+                (cutoff,),
+            ).fetchall()
+        counts = {"useful": 0, "noise": 0, "late": 0}
+        counts.update({str(row["rating"]): int(row["count"]) for row in rows})
+        # Feedback can tune move-alert sensitivity, but only inside a narrow band.
+        score = counts["noise"] - counts["useful"]
+        counts["sensitivity_factor"] = max(0.9, min(1.2, 1.0 + score * 0.03))
+        counts["total"] = sum(counts[key] for key in ("useful", "noise", "late"))
+        return counts
+
+    def record_quality_event(
+        self,
+        category: str,
+        status: str,
+        *,
+        detail: str = "",
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
+        with self._connect(write=True) as db:
+            db.execute(
+                "DELETE FROM quality_events WHERE created_at<?",
+                ((datetime.now(UTC) - timedelta(days=90)).isoformat(),),
+            )
+            db.execute(
+                """
+                INSERT INTO quality_events(
+                    category, status, detail, metrics_json, created_at
+                ) VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    category[:60],
+                    status[:30],
+                    detail[:500],
+                    self._json(metrics or {}),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def quality_summary(self, *, days: int = 7) -> dict[str, Any]:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT category, status, COUNT(*) AS count
+                FROM quality_events
+                WHERE created_at>=?
+                GROUP BY category, status
+                ORDER BY category, status
+                """,
+                (cutoff,),
+            ).fetchall()
+        return {
+            "days": days,
+            "events": [dict(row) for row in rows],
+            "feedback": self.feedback_summary(days=days),
+        }
+
+    def review_summary(self, *, days: int = 7) -> dict[str, Any]:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._connect() as db:
+            report_rows = db.execute(
+                """
+                SELECT report_type, status, COUNT(*) AS count
+                FROM report_runs
+                WHERE updated_at>=?
+                GROUP BY report_type, status
+                """,
+                (cutoff,),
+            ).fetchall()
+            alert_rows = db.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM alerts
+                WHERE sent_at>=?
+                GROUP BY status
+                """,
+                (cutoff,),
+            ).fetchall()
+        return {
+            "days": days,
+            "reports": [dict(row) for row in report_rows],
+            "alerts": [dict(row) for row in alert_rows],
+        }
 
     def is_muted(self, chat_id: str) -> bool:
         raw = str(self.preferences(chat_id).get("muted_until") or "")

@@ -36,6 +36,10 @@ Intent = Literal[
     "last",
     "status",
     "settings",
+    "watchlist",
+    "focus",
+    "quality",
+    "review",
     "mute",
     "reset",
     "alerts",
@@ -247,6 +251,10 @@ def route_query(text: str, context: dict[str, Any] | None = None) -> RouteResult
         "/last": "last",
         "/status": "status",
         "/settings": "settings",
+        "/watchlist": "watchlist",
+        "/focus": "focus",
+        "/quality": "quality",
+        "/review": "review",
         "/mute": "mute",
         "/reset": "reset",
         "/alerts": "alerts",
@@ -278,6 +286,16 @@ def route_query(text: str, context: dict[str, Any] | None = None) -> RouteResult
         return RouteResult("brief", assets, period)
     if normalized in {"상태", "봇 상태"}:
         return RouteResult("status", assets, period)
+    if "관심" in normalized and any(
+        term in normalized for term in {"자산", "종목", "추가", "빼", "삭제", "목록"}
+    ):
+        return RouteResult("watchlist", assets, period)
+    if "집중" in normalized or "우선 관찰" in normalized:
+        return RouteResult("focus", assets, period)
+    if "알림 품질" in normalized or "데이터 품질" in normalized:
+        return RouteResult("quality", assets, period)
+    if "최근 보고 점검" in normalized or "주간 점검" in normalized:
+        return RouteResult("review", assets, period)
     if normalized == "왜 움직여?":
         inherited = str((context or {}).get("asset_key") or "")
         return RouteResult(
@@ -572,9 +590,130 @@ def _help() -> str:
             "• 비트 65000 아래면 알려줘",
             "• 내 알림 목록 / 알림 2 삭제",
             "",
+            "<b>개인화·점검</b>",
+            "• 관심 자산에 비트 추가 / 관심에서 금 빼줘",
+            "• /focus 코스피 / /quality / /review",
+            "",
             "매수·매도와 가격 예측 대신 현재 데이터, 위험 요인, 예정 이벤트를 알려드립니다.",
         ]
     )
+
+
+def _watchlist(
+    text: str,
+    keys: list[str],
+    settings: Settings,
+    store: StateStore | None,
+) -> str:
+    if store is None:
+        return "<b>관심 자산 저장소를 사용할 수 없습니다.</b>"
+    normalized = _normalized(text)
+    if keys:
+        if any(term in normalized for term in {"빼", "삭제", "제거"}):
+            removed = store.remove_watch_asset(settings.telegram_chat_id, keys[0])
+            action = "제외했습니다" if removed else "등록되어 있지 않습니다"
+            return f"<b>{html.escape(ASSET_DEFINITIONS[keys[0]]['name'])}</b>을 관심 자산에서 {action}."
+        current = store.watchlist(settings.telegram_chat_id)
+        if keys[0] not in {str(item["asset_key"]) for item in current} and len(current) >= 8:
+            return "관심 자산은 최대 8개입니다. 하나를 제외한 뒤 추가하세요."
+        store.set_watch_asset(settings.telegram_chat_id, keys[0], priority=2)
+        return (
+            f"<b>{html.escape(ASSET_DEFINITIONS[keys[0]]['name'])}</b>을 관심 자산에 추가했습니다.\n"
+            "앞으로 리포트와 원인 설명에서 먼저 살핍니다."
+        )
+    items = store.watchlist(settings.telegram_chat_id)
+    lines = ["<b>관심 자산</b>"]
+    if not items:
+        lines.extend(
+            [
+                "아직 등록된 자산이 없습니다.",
+                "예: <i>관심 자산에 비트 추가</i>",
+            ]
+        )
+        return "\n".join(lines)
+    focus = str(store.preferences(settings.telegram_chat_id).get("focus_asset") or "")
+    for item in items:
+        key = str(item["asset_key"])
+        name = ASSET_DEFINITIONS.get(key, {}).get("name", key)
+        marker = " · 최우선" if key == focus else ""
+        lines.append(f"• {html.escape(str(name))}{marker}")
+    lines.append("\n제외: <i>관심에서 금 빼줘</i>")
+    return "\n".join(lines)
+
+
+def _focus(
+    text: str,
+    keys: list[str],
+    settings: Settings,
+    store: StateStore | None,
+) -> str:
+    if store is None:
+        return "<b>우선 관찰 설정을 사용할 수 없습니다.</b>"
+    normalized = _normalized(text)
+    if any(term in normalized for term in {"해제", "없애", "초기화"}):
+        store.update_preferences(settings.telegram_chat_id, focus_asset="")
+        return "우선 관찰 자산을 해제했습니다. 관심 자산 목록은 그대로입니다."
+    if not keys:
+        key = str(store.preferences(settings.telegram_chat_id).get("focus_asset") or "")
+        if not key:
+            return "우선 관찰 자산이 없습니다. 예: <i>/focus 비트</i>"
+        name = ASSET_DEFINITIONS.get(key, {}).get("name", key)
+        return f"현재 우선 관찰 자산: <b>{html.escape(str(name))}</b>"
+    key = keys[0]
+    store.set_watch_asset(settings.telegram_chat_id, key, priority=3)
+    store.update_preferences(settings.telegram_chat_id, focus_asset=key)
+    return (
+        f"<b>{html.escape(ASSET_DEFINITIONS[key]['name'])}</b>을 최우선으로 관찰합니다.\n"
+        "관련 변동과 뉴스가 있으면 리포트에서 먼저 보여줍니다."
+    )
+
+
+def _quality(store: StateStore | None) -> str:
+    if store is None:
+        return "품질 저장소를 사용할 수 없습니다."
+    quality = store.runtime_state("data_quality")
+    assets = quality.get("assets") if isinstance(quality.get("assets"), dict) else {}
+    verified = sum(1 for item in assets.values() if item.get("status") == "verified")
+    fallback = sum(1 for item in assets.values() if item.get("status") == "last_verified")
+    rejected = sum(1 for item in assets.values() if item.get("status") == "rejected")
+    feedback = store.feedback_summary(days=7)
+    health = store.provider_health()
+    delayed = sum(1 for item in health if int(item["consecutive_failures"]) >= 3)
+    return "\n".join(
+        [
+            "<b>최근 품질 점검</b>",
+            f"검증 통과 자산: {verified}개",
+            f"마지막 정상값 사용: {fallback}개",
+            f"검증 거부·생략: {rejected}개",
+            f"지연된 공급원: {delayed}개",
+            "",
+            f"최근 7일 피드백: 유용 {feedback['useful']} · 불필요 {feedback['noise']} · 늦음 {feedback['late']}",
+            "알림 민감도는 피드백을 반영하되 기본값의 10~20% 범위에서만 조정합니다.",
+        ]
+    )
+
+
+def _review(store: StateStore | None) -> str:
+    if store is None:
+        return "점검 저장소를 사용할 수 없습니다."
+    summary = store.review_summary(days=7)
+    report_names = {
+        "morning": "모닝",
+        "korea_close": "한국 마감",
+        "europe_close": "유럽 마감",
+        "us_open": "미국 개장 전",
+    }
+    lines = ["<b>최근 7일 보고 점검</b>"]
+    if not summary["reports"]:
+        lines.append("저장된 리포트 실행 기록이 없습니다.")
+    for item in summary["reports"]:
+        name = report_names.get(str(item["report_type"]), str(item["report_type"]))
+        status = "전송" if item["status"] == "sent" else "건너뜀"
+        lines.append(f"• {html.escape(name)} {status}: {item['count']}회")
+    alert_total = sum(int(item["count"]) for item in summary["alerts"])
+    lines.append(f"• 긴급·급변 기록: {alert_total}건")
+    lines.append("\n세부 데이터 상태는 /quality에서 확인할 수 있습니다.")
+    return "\n".join(lines)
 
 
 def _start() -> str:
@@ -1189,6 +1328,20 @@ def handle_market_query(
         return BotResponse(_status(settings, store), REMOVE_KEYBOARD)
     if route.intent == "settings":
         return BotResponse(_settings(text, settings, store), REMOVE_KEYBOARD)
+    if route.intent == "watchlist":
+        return BotResponse(
+            _watchlist(text, route.asset_keys, settings, store),
+            REMOVE_KEYBOARD,
+        )
+    if route.intent == "focus":
+        return BotResponse(
+            _focus(text, route.asset_keys, settings, store),
+            REMOVE_KEYBOARD,
+        )
+    if route.intent == "quality":
+        return BotResponse(_quality(store), REMOVE_KEYBOARD)
+    if route.intent == "review":
+        return BotResponse(_review(store), REMOVE_KEYBOARD)
     if route.intent == "mute":
         return BotResponse(_mute(text, settings, store), REMOVE_KEYBOARD)
     if route.intent == "reset":

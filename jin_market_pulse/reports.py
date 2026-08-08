@@ -327,12 +327,31 @@ def _format_quote_html(quote: AssetQuote) -> str:
     )
 
 
-def select_report_assets(quotes: dict[str, AssetQuote]) -> list[AssetQuote]:
+def select_report_assets(
+    quotes: dict[str, AssetQuote],
+    focus_asset_keys: list[str] | None = None,
+) -> list[AssetQuote]:
     selected = [
         quotes[key]
         for key in CORE_ASSET_KEYS
         if key in quotes and not quotes[key].stale and quotes[key].verified
     ]
+    selected_keys = {quote.key for quote in selected}
+    personalized = next(
+        (
+            quotes[key]
+            for key in (focus_asset_keys or [])
+            if key in quotes
+            and key not in selected_keys
+            and not quotes[key].stale
+            and quotes[key].verified
+        ),
+        None,
+    )
+    if personalized:
+        selected.append(personalized)
+        return selected
+
     extras: list[tuple[float, AssetQuote]] = []
     for key, threshold in EXTRA_THRESHOLDS.items():
         quote = quotes.get(key)
@@ -348,6 +367,36 @@ def select_report_assets(quotes: dict[str, AssetQuote]) -> list[AssetQuote]:
     if extras:
         selected.append(max(extras, key=lambda item: item[0])[1])
     return selected
+
+
+def _delta_summary(data: MarketData) -> tuple[str, str]:
+    changed: list[str] = []
+    continuing: list[str] = []
+    priority = list(dict.fromkeys([*data.focus_asset_keys, *CORE_ASSET_KEYS]))
+    for key in priority:
+        quote = data.quotes.get(key)
+        previous = data.recent_report_facts.get(f"asset:v2:{key}")
+        if (
+            not quote
+            or quote.percent_change is None
+            or not previous
+            or previous.get("numeric_value") is None
+        ):
+            continue
+        old_value = float(previous["numeric_value"])
+        old_direction = int(previous.get("direction") or 0)
+        new_direction = 1 if quote.percent_change > 0 else -1 if quote.percent_change < 0 else 0
+        name = quote.name_ko
+        if new_direction and old_direction and new_direction != old_direction:
+            changed.append(f"{name} 방향 반전")
+        elif abs(quote.percent_change - old_value) >= 0.5:
+            changed.append(f"{name} 변동 확대")
+        elif new_direction and new_direction == old_direction:
+            continuing.append(f"{name} {'상승' if new_direction > 0 else '하락'}")
+    return (
+        " · ".join(changed[:2]) or "직전 보고 이후 핵심 방향 반전 없음",
+        " · ".join(continuing[:2]) or "반복할 만한 지속 신호 없음",
+    )
 
 
 def select_future_events(data: MarketData) -> list[EconomicEvent]:
@@ -473,6 +522,7 @@ def _render_report(
     news_map = _news_by_id(data.news)
     events = select_future_events(data)
     summary, relationship = _market_summary(data.quotes)
+    changed, continuing = _delta_summary(data)
     us_close = _us_close_summary(data.quotes)
     lines = [
         "<b>JIN Market Pulse</b>",
@@ -480,11 +530,16 @@ def _render_report(
         "",
         "<b>한눈에</b>",
         html.escape(summary),
+        f"새 변화: {html.escape(changed)}",
+        f"이어짐: {html.escape(continuing)}",
         *([f"미국장 마감: {html.escape(us_close)}"] if us_close else []),
         "",
         REQUIRED_HEADINGS[0],
     ]
-    lines.extend(_format_quote_html(quote) for quote in select_report_assets(data.quotes))
+    lines.extend(
+        _format_quote_html(quote)
+        for quote in select_report_assets(data.quotes, data.focus_asset_keys)
+    )
 
     lines.extend(["", REQUIRED_HEADINGS[1]])
     signals = analysis.signals[:signal_limit]

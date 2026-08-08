@@ -173,9 +173,38 @@ def process_telegram_update(
     callback = payload.get("callback_query") or {}
     if callback:
         callback_id = str(callback.get("id") or "")
+        callback_data = str(callback.get("data") or "")
+        if callback_data.startswith("fb:"):
+            parts = callback_data.split(":", 2)
+            message = callback.get("message") or {}
+            message_id = message.get("message_id")
+            valid_rating = len(parts) == 3 and parts[2] in {
+                "useful", "noise", "late"
+            }
+            if valid_rating and isinstance(message_id, int):
+                state.record_feedback(
+                    settings.telegram_chat_id,
+                    message_id,
+                    f"message:{message_id}",
+                    parts[1],
+                    parts[2],
+                )
+                if callback_id:
+                    labels = {
+                        "useful": "유용함으로 반영했습니다.",
+                        "noise": "불필요함으로 반영했습니다.",
+                        "late": "늦은 알림으로 반영했습니다.",
+                    }
+                    telegram.answer_callback(
+                        callback_id,
+                        labels.get(parts[2], "반영했습니다."),
+                    )
+            elif callback_id:
+                telegram.answer_callback(callback_id, "반영하지 못했습니다.")
+            return
         if callback_id:
             telegram.answer_callback(callback_id)
-        text = _callback_text(str(callback.get("data") or ""))
+        text = _callback_text(callback_data)
         response = handle_market_query(text, settings, state)
         _send_bot_response(response, telegram)
         return

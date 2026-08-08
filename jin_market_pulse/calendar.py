@@ -324,8 +324,9 @@ def _official_bls_events(
             provider="bls_calendar",
             attempts=3,
             headers={
+                **CALENDAR_REQUEST_HEADERS,
                 "User-Agent": (
-                    "JIN-Market-Pulse/2.2 "
+                    "JIN-Market-Pulse/3.0 "
                     f"(personal bot; {settings.data_contact_email})"
                 ),
                 "Accept": "text/calendar",
@@ -418,7 +419,11 @@ def _official_bea_events(
             settings,
             provider="bea_calendar",
             attempts=3,
-            headers={"User-Agent": "JIN-Market-Pulse/2.2"},
+            headers={
+                **CALENDAR_REQUEST_HEADERS,
+                "User-Agent": "JIN-Market-Pulse/3.0",
+                "Accept": "text/html,*/*",
+            },
             session=SimpleNamespace(get=requests.get),
         )
         body = response.text
