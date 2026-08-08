@@ -262,6 +262,14 @@ def check_price_alerts(
         except Exception:
             logging.warning("Price alert quote failed for %s.", key)
             continue
+        if (
+            quote.stale
+            or not quote.verified
+            or quote.validation_status != "verified"
+            or quote.calculation_version < 2
+        ):
+            logging.info("Price alert skipped unverified quote for %s.", key)
+            continue
         threshold = float(item["threshold"])
         direction = str(item["direction"])
         recurring = bool(item["recurring"])

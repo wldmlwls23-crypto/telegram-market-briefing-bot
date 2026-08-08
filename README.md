@@ -1,4 +1,4 @@
-# JIN Market Pulse v2.3
+# JIN Market Pulse v2.4
 
 한국인 개인 사용자가 Telegram 하나에서 아침 시장 파악, 실시간 가격 조회,
 경제일정, 움직임의 배경, 개인 가격 알림을 처리하는 서버리스 봇입니다.
@@ -62,6 +62,10 @@ DXY가 뭐야?
 
 ## 데이터 원칙
 
+- 모든 전일 대비 변화율은 `chartPreviousClose`가 아니라 최근 두 완료 정규장 일봉으로 직접 계산합니다.
+- KOSPI·KOSDAQ·삼성전자·SK하이닉스는 Naver 정규장 값을 우선하고 Yahoo 일봉과 가격 0.3%, 변화율 0.15%p 이내에서 교차 검증합니다.
+- 신규 검증에 실패하면 허용 기한 안의 마지막 검증값과 기준 시각만 표시합니다. 이 값은 급변·원인 분석·개인 가격 알림에 사용하지 않습니다.
+- 기존 캐시는 보존하되 계산 버전 2의 `quote:v2` 값만 읽습니다.
 - BTC·ETH: CoinGecko, Yahoo Finance 교차 경로
 - 지수·외환·원자재: Yahoo Finance, FMP 키가 있을 때 선택적 보조
 - 미국채 2년·10년: U.S. Treasury, FRED 보조
@@ -101,11 +105,12 @@ GET  /health
 GET  /ready
 POST /jobs/tick
 POST /jobs/morning
+POST /jobs/data-audit
 POST /jobs/report/{report_type}
 POST /telegram/webhook
 ```
 
-`/jobs/tick`, `/jobs/morning`, `/jobs/report/{report_type}`은
+`/jobs/tick`, `/jobs/morning`, `/jobs/data-audit`, `/jobs/report/{report_type}`은
 `Authorization: Bearer <CRON_SECRET>`을
 검증합니다. Telegram 웹훅은 `X-Telegram-Bot-Api-Secret-Token`과 허용된
 `TELEGRAM_CHAT_ID`를 모두 검증합니다.

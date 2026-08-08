@@ -397,6 +397,8 @@ def _meaningful_market_move(
             quote
             and quote.verified
             and not quote.stale
+            and quote.validation_status == "verified"
+            and quote.calculation_version >= 2
             and quote.percent_change is not None
             and abs(quote.percent_change) >= thresholds.get(key, 2.0)
         ):
@@ -405,6 +407,9 @@ def _meaningful_market_move(
         return any(
             quote
             and quote.verified
+            and not quote.stale
+            and quote.validation_status == "verified"
+            and quote.calculation_version >= 2
             and quote.absolute_change is not None
             and abs(quote.absolute_change * 100) >= 5
             for key in ("us2y", "us10y")

@@ -179,7 +179,7 @@ class MarketPulseApp:
             self.state.save_message(delivery_key, report, parse_mode="HTML")
             report_facts = [
                 {
-                    "fact_key": f"asset:{key}",
+                    "fact_key": f"asset:v2:{key}",
                     "numeric_value": quote.percent_change,
                     "direction": (
                         1
@@ -192,6 +192,9 @@ class MarketPulseApp:
                 }
                 for key, quote in data.quotes.items()
                 if quote.percent_change is not None
+                and quote.validation_status == "verified"
+                and quote.calculation_version >= 2
+                and not quote.stale
             ]
             report_facts.extend(
                 {

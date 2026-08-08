@@ -32,6 +32,9 @@ def _quote(
         as_of=datetime.now(timezone.utc),
         market_state="PRE",
         source="fixture",
+        validation_status="verified",
+        validation_sources=["fixture"],
+        calculation_version=2,
     )
 
 

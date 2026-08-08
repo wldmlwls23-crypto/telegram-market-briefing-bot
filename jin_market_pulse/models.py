@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-AssetKind = Literal["crypto", "index", "fx", "commodity", "yield"]
+AssetKind = Literal["crypto", "equity", "index", "fx", "commodity", "yield"]
 
 
 class AssetQuote(BaseModel):
@@ -26,6 +26,13 @@ class AssetQuote(BaseModel):
     proxy: bool = False
     verified: bool = True
     quality_flags: list[str] = Field(default_factory=list)
+    reference_at: datetime | None = None
+    symbol: str = ""
+    currency: str = ""
+    price_basis: str = "unknown"
+    validation_status: Literal["verified", "last_verified", "rejected"] = "verified"
+    validation_sources: list[str] = Field(default_factory=list)
+    calculation_version: int = 1
 
 
 class EconomicEvent(BaseModel):

@@ -51,7 +51,7 @@ def _news(
     )
 
 
-def test_schema_v2_and_report_state_persist(tmp_path):
+def test_schema_v3_and_report_state_persist(tmp_path):
     state = StateStore(tmp_path / "state.sqlite3")
     state.record_report_run(
         "korea_close:2026-07-29",
@@ -61,7 +61,7 @@ def test_schema_v2_and_report_state_persist(tmp_path):
         text="report",
         facts=[
             {
-                "fact_key": "asset:kospi",
+                "fact_key": "asset:v2:kospi",
                 "numeric_value": -1.2,
                 "direction": -1,
                 "official": False,
@@ -69,9 +69,9 @@ def test_schema_v2_and_report_state_persist(tmp_path):
         ],
     )
 
-    assert state.readiness()["schema_version"] == 2
+    assert state.readiness()["schema_version"] == 3
     assert state.latest_report_run("korea_close")["text"] == "report"
-    assert state.recent_report_facts()["asset:kospi"]["direction"] == -1
+    assert state.recent_report_facts()["asset:v2:kospi"]["direction"] == -1
 
 
 def test_fact_dedup_allows_reversal_and_half_point_extension(tmp_path):
@@ -127,7 +127,7 @@ def test_session_report_mobile_contract(market_data):
         "korea_close",
         quotes,
         [],
-        {"asset:kospi"},
+        {"asset:v2:kospi"},
         now=datetime.now(KST),
         next_check="07/29 21:30 미국 GDP",
     )
@@ -240,7 +240,7 @@ def test_detect_large_moves_uses_30m_and_2h_thresholds(market_data, monkeypatch,
         value = 100000 if minutes < 60 else 101500
         return {
             "captured_at": before.isoformat(),
-            "quotes": {"btc": {"current": value}},
+            "quotes": {"btc": {"current": value, "calculation_version": 2}},
         }
 
     monkeypatch.setattr(state, "latest_market_snapshot", fake_snapshot)
@@ -266,7 +266,7 @@ def test_detect_large_moves_requires_faster_than_recent_usual_move(
         "latest_market_snapshot",
         lambda *, before=None: {
             "captured_at": before.isoformat(),
-            "quotes": {"btc": {"current": 100000}},
+            "quotes": {"btc": {"current": 100000, "calculation_version": 2}},
         },
     )
     history = []
@@ -275,7 +275,9 @@ def test_detect_large_moves_requires_faster_than_recent_usual_move(
         history.append(
             {
                 "captured_at": (now - timedelta(minutes=(20 - index) * 30)).isoformat(),
-                "quotes": {"btc": {"current": value}},
+                    "quotes": {
+                        "btc": {"current": value, "calculation_version": 2}
+                    },
             }
         )
         value *= 1.01

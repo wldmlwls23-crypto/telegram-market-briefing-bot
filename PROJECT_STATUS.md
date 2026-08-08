@@ -5,7 +5,7 @@
 ## 기준
 
 - 폴더: `D:\Codex\JIN-Market-Pulse`
-- 버전: v2.3 장 마감·속보 고도화판
+- 버전: v2.4 데이터 신뢰성 개편
 - 브랜치: `main`
 - 운영 형태: Railway Serverless 웹 서비스와 15분 Cron
 

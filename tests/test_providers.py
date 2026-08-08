@@ -31,18 +31,24 @@ class FakeResponse:
         return self._payload
 
 
-def test_yahoo_uses_previous_close_not_open(monkeypatch, settings):
+def test_yahoo_uses_last_two_daily_closes_not_chart_range_start(monkeypatch, settings):
     timestamp = int(datetime.now(timezone.utc).timestamp())
+    previous_timestamp = timestamp - 24 * 60 * 60
     payload = {
         "chart": {
             "result": [
                 {
                     "meta": {
                         "regularMarketPrice": 97,
-                        "chartPreviousClose": 100,
+                        "chartPreviousClose": 80,
+                        "previousClose": 85,
                         "regularMarketTime": timestamp,
                         "marketState": "CLOSED",
-                    }
+                        "exchangeTimezoneName": "UTC",
+                        "currency": "USD",
+                    },
+                    "timestamp": [previous_timestamp, timestamp],
+                    "indicators": {"quote": [{"close": [100, 97]}]},
                 }
             ]
         }
@@ -63,6 +69,8 @@ def test_yahoo_uses_previous_close_not_open(monkeypatch, settings):
     assert quote.previous == 100
     assert quote.absolute_change == -3
     assert quote.percent_change == -3
+    assert quote.calculation_version == 2
+    assert quote.reference_at == datetime.fromtimestamp(previous_timestamp, timezone.utc)
 
 
 def test_critical_gate_requires_four_market_axes(market_data):
@@ -215,10 +223,10 @@ def test_single_quote_falls_back_to_sqlite_cache(
 ):
     store = StateStore(settings.state_db)
     cached = market_data.quotes["btc"].model_copy(
-        update={"source": "cached fixture"}
+        update={"source": "cached fixture", "calculation_version": 2}
     )
     store.cache_set(
-        "quote:btc",
+        "quote:v2:btc",
         cached.model_dump(mode="json"),
         source=cached.source,
         ttl_seconds=60,
@@ -230,8 +238,9 @@ def test_single_quote_falls_back_to_sqlite_cache(
 
     quote = fetch_asset_quote("btc", settings, store)
 
-    assert "마지막 정상값" in quote.source
+    assert "마지막 검증값" in quote.source
     assert "cached" in quote.quality_flags
+    assert quote.validation_status == "last_verified"
 
 
 def test_wti_outlier_is_rejected_when_proxy_moves_opposite(

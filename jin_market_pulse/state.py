@@ -14,7 +14,7 @@ from .models import AssetQuote
 
 
 UTC = timezone.utc
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StateStore:
@@ -521,6 +521,10 @@ class StateStore:
             }
             for key, quote in quotes.items()
             if key in {"btc", "dxy", "nasdaq100", "us2y", "us10y"}
+            and quote.verified
+            and not quote.stale
+            and quote.validation_status == "verified"
+            and quote.calculation_version >= 2
         }
         self.update_event(event_id, **{f"{stage}_snapshot": snapshot})
 
@@ -531,12 +535,17 @@ class StateStore:
                 "current": quote.current,
                 "kind": quote.kind,
                 "as_of": quote.as_of.isoformat(),
+                "calculation_version": quote.calculation_version,
             }
             for key, quote in quotes.items()
             if key in {
                 "btc", "eth", "dxy", "nasdaq100", "kospi", "kosdaq",
                 "usdkrw", "us10y", "wti", "gold"
             }
+            and quote.verified
+            and not quote.stale
+            and quote.validation_status == "verified"
+            and quote.calculation_version >= 2
         }
         cutoff = (now - timedelta(days=7)).isoformat()
         with self._connect(write=True) as db:
@@ -1292,8 +1301,20 @@ class StateStore:
             version = db.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
             ).fetchone()
+        quality = self.runtime_state("data_quality")
+        assets = quality.get("assets") if isinstance(quality.get("assets"), dict) else {}
         return {
             "database": "ok",
             "schema_version": int(version["value"]) if version else 0,
             "path": str(self.path),
+            "data_quality": {
+                "checked_at": quality.get("checked_at"),
+                "calculation_version": quality.get("calculation_version"),
+                "verified_assets": sum(
+                    1 for item in assets.values() if item.get("status") == "verified"
+                ),
+                "last_verified_assets": sum(
+                    1 for item in assets.values() if item.get("status") == "last_verified"
+                ),
+            },
         }

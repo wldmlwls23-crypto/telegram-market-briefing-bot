@@ -13,6 +13,7 @@ from .bot_queries import handle_market_query
 from .config import Settings
 from .jobs import process_telegram_update, run_tick
 from .links import first_https_url
+from .providers import audit_market_data
 from .session_reports import REPORT_TYPES, send_session_report
 from .state import StateStore
 from .telegram import TelegramClient
@@ -43,6 +44,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     morning_lock = Lock()
     tick_lock = Lock()
     report_lock = Lock()
+    audit_lock = Lock()
 
     def current_settings() -> Settings:
         return settings or Settings.from_env(require_secrets=True)
@@ -110,7 +112,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "ready",
             "database": readiness["database"],
             "schema_version": readiness["schema_version"],
+            "data_quality": readiness["data_quality"],
         }
+
+    @api.post("/jobs/data-audit")
+    async def data_audit_job(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        job_settings = current_settings()
+        if not _authorized(authorization, job_settings.cron_secret):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+        if not audit_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Data audit is already running",
+            )
+        try:
+            store = state_for(job_settings)
+            return await run_in_threadpool(
+                lambda: audit_market_data(job_settings, store)
+            )
+        except Exception:
+            logging.exception("Data audit failed.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Data audit failed",
+            ) from None
+        finally:
+            audit_lock.release()
 
     @api.post("/jobs/morning")
     async def morning_job(

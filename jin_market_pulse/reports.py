@@ -106,6 +106,16 @@ def _quote_payload(quote: AssetQuote) -> dict[str, object]:
     }
 
 
+def _is_fresh_quote(quote: AssetQuote | None) -> bool:
+    return bool(
+        quote
+        and quote.verified
+        and not quote.stale
+        and quote.validation_status == "verified"
+        and quote.calculation_version >= 2
+    )
+
+
 def _publisher_is_tier_one(publisher: str) -> bool:
     normalized = publisher.lower()
     return any(name in normalized for name in TIER_ONE_PUBLISHERS)
@@ -162,7 +172,11 @@ def qualified_morning_news(data: MarketData) -> list[NewsItem]:
 def _analysis_input(data: MarketData) -> str:
     payload = {
         "generated_at_kst": data.generated_at_kst.isoformat(),
-        "assets": [_quote_payload(quote) for quote in data.quotes.values()],
+        "assets": [
+            _quote_payload(quote)
+            for quote in data.quotes.values()
+            if _is_fresh_quote(quote)
+        ],
         "news_candidates": [
             {
                 "candidate_id": item.news_id,
@@ -302,9 +316,14 @@ def _format_quote_html(quote: AssetQuote) -> str:
     arrow, movement = _movement(quote)
     comparison = "24시간" if quote.key == "btc" else quote.comparison_label
     move_text = f" {arrow}{movement}" if movement else ""
+    fallback = (
+        f" · 마지막 검증값 {quote.as_of.astimezone(KST):%m/%d %H:%M}"
+        if quote.validation_status == "last_verified"
+        else ""
+    )
     return (
         f"- {html.escape(quote.name_ko)} <b>{current}</b>{move_text}"
-        f" · {html.escape(_short(comparison, 18))}"
+        f" · {html.escape(_short(comparison, 18))}{fallback}"
     )
 
 
@@ -350,14 +369,17 @@ def select_future_events(data: MarketData) -> list[EconomicEvent]:
 
 
 def _axis_text(quote: AssetQuote | None, label: str) -> str:
-    if not quote or quote.stale or not quote.verified:
+    if not _is_fresh_quote(quote):
         return ""
     arrow, movement = _movement(quote)
     return f"{label}{arrow}{movement}"
 
 
 def _market_summary(quotes: dict[str, AssetQuote]) -> tuple[str, str]:
-    rate = quotes.get("us10y") or quotes.get("us2y")
+    rate = next(
+        (quote for key in ("us10y", "us2y") if _is_fresh_quote(quote := quotes.get(key))),
+        None,
+    )
     pieces = [
         _axis_text(quotes.get("dxy"), "달러"),
         _axis_text(rate, "금리"),
@@ -366,12 +388,13 @@ def _market_summary(quotes: dict[str, AssetQuote]) -> tuple[str, str]:
     ]
     first = " · ".join(piece for piece in pieces if piece)
 
-    dxy_change = (quotes.get("dxy").absolute_change if quotes.get("dxy") else None)
+    dxy = quotes.get("dxy")
+    nasdaq = quotes.get("nasdaq100")
+    btc = quotes.get("btc")
+    dxy_change = dxy.absolute_change if _is_fresh_quote(dxy) else None
     rate_change = rate.absolute_change if rate else None
-    nasdaq_change = (
-        quotes.get("nasdaq100").absolute_change if quotes.get("nasdaq100") else None
-    )
-    btc_change = quotes.get("btc").absolute_change if quotes.get("btc") else None
+    nasdaq_change = nasdaq.absolute_change if _is_fresh_quote(nasdaq) else None
+    btc_change = btc.absolute_change if _is_fresh_quote(btc) else None
     if (
         dxy_change is not None
         and rate_change is not None
@@ -409,8 +432,7 @@ def _us_close_summary(quotes: dict[str, AssetQuote]) -> str:
         quote = quotes.get(key)
         if (
             not quote
-            or quote.stale
-            or not quote.verified
+            or not _is_fresh_quote(quote)
             or quote.percent_change is None
         ):
             continue
@@ -438,6 +460,7 @@ def _signal_reaction(signal: object, data: MarketData) -> str:
         _axis_text(data.quotes.get(key), data.quotes[key].name_ko)
         for key in keys
         if key in data.quotes
+        and _is_fresh_quote(data.quotes[key])
     )
 
 
@@ -576,7 +599,11 @@ def create_emergency_analysis(
     client = OpenAI(api_key=settings.openai_api_key)
     payload = {
         "news": [item.model_dump(mode="json") for item in news_group[:3]],
-        "market_directions": [_quote_payload(quote) for quote in quotes.values()],
+        "market_directions": [
+            _quote_payload(quote)
+            for quote in quotes.values()
+            if _is_fresh_quote(quote)
+        ],
     }
     request: dict[str, object] = {
         "model": settings.openai_model,

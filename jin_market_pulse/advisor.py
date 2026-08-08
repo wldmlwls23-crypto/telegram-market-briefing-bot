@@ -202,7 +202,13 @@ def _current_context(
     quotes_payload = []
     for key in dict.fromkeys(quote_keys):
         quote = market_quotes.get(key)
-        if quote is None or quote.stale or not quote.verified:
+        if (
+            quote is None
+            or quote.stale
+            or not quote.verified
+            or quote.validation_status != "verified"
+            or quote.calculation_version < 2
+        ):
             continue
         quotes_payload.append(
             {

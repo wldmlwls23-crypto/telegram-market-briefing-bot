@@ -98,7 +98,7 @@ def _snapshot_move(
     now: datetime,
 ) -> MarketMove | None:
     old = (snapshot.get("quotes") or {}).get(quote.key)
-    if not old:
+    if not old or int(old.get("calculation_version") or 0) < 2:
         return None
     try:
         before = float(old["current"])
@@ -139,7 +139,7 @@ def _historical_moves(
     points: list[tuple[datetime, float]] = []
     for snapshot in history:
         raw = (snapshot.get("quotes") or {}).get(asset_key)
-        if not raw:
+        if not raw or int(raw.get("calculation_version") or 0) < 2:
             continue
         try:
             captured = datetime.fromisoformat(str(snapshot["captured_at"])).astimezone(UTC)
@@ -205,7 +205,13 @@ def detect_large_moves(
     detected: list[MarketMove] = []
     for key, (short_limit, long_limit) in MOVE_THRESHOLDS.items():
         quote = quotes.get(key)
-        if not quote or quote.stale or not quote.verified:
+        if (
+            not quote
+            or quote.stale
+            or not quote.verified
+            or quote.validation_status != "verified"
+            or quote.calculation_version < 2
+        ):
             continue
         short_move = _snapshot_move(
             quote,

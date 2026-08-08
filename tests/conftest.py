@@ -51,6 +51,10 @@ def make_quote(
         comparison_label="전일 종가",
         stale=False,
         unit="",
+        symbol=key,
+        validation_status="verified",
+        validation_sources=[source],
+        calculation_version=2,
     )
 
 

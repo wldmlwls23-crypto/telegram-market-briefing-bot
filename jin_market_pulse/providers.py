@@ -3,11 +3,13 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from urllib.parse import quote as url_quote
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -26,6 +28,7 @@ TREASURY_XML_URL = (
 )
 FMP_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+NAVER_REALTIME_URL = "https://polling.finance.naver.com/api/realtime/domestic/{asset_type}/{symbol}"
 
 YAHOO_ASSETS: dict[str, dict[str, str]] = {
     "sp500": {"symbol": "^GSPC", "name": "S&P 500", "kind": "index", "unit": "pt"},
@@ -40,8 +43,8 @@ YAHOO_ASSETS: dict[str, dict[str, str]] = {
 }
 
 SESSION_ASSETS: dict[str, dict[str, str]] = {
-    "samsung": {"symbol": "005930.KS", "name": "삼성전자", "kind": "index", "unit": "원"},
-    "skhynix": {"symbol": "000660.KS", "name": "SK하이닉스", "kind": "index", "unit": "원"},
+    "samsung": {"symbol": "005930.KS", "name": "삼성전자", "kind": "equity", "unit": "원"},
+    "skhynix": {"symbol": "000660.KS", "name": "SK하이닉스", "kind": "equity", "unit": "원"},
     "nasdaq_futures": {"symbol": "NQ=F", "name": "Nasdaq 선물", "kind": "index", "unit": "pt"},
     "eurostoxx50": {"symbol": "^STOXX50E", "name": "Euro Stoxx 50", "kind": "index", "unit": "pt"},
     "dax": {"symbol": "^GDAXI", "name": "DAX", "kind": "index", "unit": "pt"},
@@ -93,7 +96,22 @@ OUTLIER_THRESHOLDS = {
     "eurostoxx50": 3.0,
     "dax": 3.0,
     "eurusd": 0.7,
+    "samsung": 15.0,
+    "skhynix": 15.0,
 }
+
+KOREA_ASSETS = {
+    "kospi": ("index", "KOSPI"),
+    "kosdaq": ("index", "KOSDAQ"),
+    "samsung": ("stock", "005930"),
+    "skhynix": ("stock", "000660"),
+}
+
+CALCULATION_VERSION = 2
+
+
+class DataValidationError(RuntimeError):
+    pass
 
 
 def _session() -> requests.Session:
@@ -120,7 +138,7 @@ def _is_stale(as_of: datetime, kind: str, market_state: str) -> bool:
     age = datetime.now(UTC) - as_of.astimezone(UTC)
     if kind == "crypto":
         return age > timedelta(hours=2)
-    if market_state.upper() in {"CLOSED", "PRE", "POST"}:
+    if market_state.upper() in {"CLOSE", "CLOSED", "PRE", "POST"}:
         return age > timedelta(days=4)
     return age > timedelta(hours=36)
 
@@ -169,8 +187,105 @@ def fetch_crypto_quotes(settings: Settings) -> dict[str, AssetQuote]:
             comparison_label="24시간 전",
             stale=_is_stale(updated_at, "crypto", "OPEN"),
             unit="USD",
+            reference_at=updated_at - timedelta(hours=24),
+            symbol="BTC-USD" if key == "btc" else "ETH-USD",
+            currency="USD",
+            price_basis="24h",
+            validation_status="verified",
+            validation_sources=["CoinGecko"],
+            calculation_version=CALCULATION_VERSION,
         )
     return result
+
+
+def _finite_positive(value: Any, *, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise DataValidationError(f"invalid {field}") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise DataValidationError(f"invalid {field}")
+    return number
+
+
+def _exchange_timezone(meta: dict[str, Any]) -> ZoneInfo:
+    try:
+        return ZoneInfo(str(meta.get("exchangeTimezoneName") or "UTC"))
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _completed_daily_bars(
+    result: dict[str, Any],
+    timezone_info: ZoneInfo,
+) -> list[tuple[datetime, float]]:
+    timestamps = result.get("timestamp") or []
+    closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    by_date: dict[date, tuple[datetime, float]] = {}
+    for raw_timestamp, raw_close in zip(timestamps, closes):
+        if raw_close is None:
+            continue
+        timestamp = datetime.fromtimestamp(int(raw_timestamp), UTC)
+        close = _finite_positive(raw_close, field="daily close")
+        by_date[timestamp.astimezone(timezone_info).date()] = (timestamp, close)
+    return sorted(by_date.values(), key=lambda item: item[0])
+
+
+def _split_factor(
+    result: dict[str, Any],
+    *,
+    after: datetime,
+    through: datetime,
+) -> float:
+    factor = 1.0
+    splits = (result.get("events") or {}).get("splits") or {}
+    for item in splits.values():
+        timestamp = datetime.fromtimestamp(int(item.get("date") or 0), UTC)
+        if not (after < timestamp <= through + timedelta(days=1)):
+            continue
+        numerator = float(item.get("numerator") or 0)
+        denominator = float(item.get("denominator") or 0)
+        if numerator > 0 and denominator > 0:
+            factor *= numerator / denominator
+    return factor
+
+
+def _yahoo_reference_close(
+    result: dict[str, Any],
+    *,
+    current: float,
+    as_of: datetime,
+    timezone_info: ZoneInfo,
+) -> tuple[float, datetime, list[str]]:
+    bars = _completed_daily_bars(result, timezone_info)
+    if len(bars) < 2:
+        raise DataValidationError("Yahoo returned fewer than two daily closes")
+
+    current_date = as_of.astimezone(timezone_info).date()
+    current_index = next(
+        (index for index in range(len(bars) - 1, -1, -1)
+         if bars[index][0].astimezone(timezone_info).date() == current_date),
+        len(bars) - 1,
+    )
+    if current_index == 0:
+        raise DataValidationError("Yahoo daily history has no reference session")
+    current_bar_time, current_bar = bars[current_index]
+    reference_at, previous = bars[current_index - 1]
+    if abs(current - current_bar) / current > 0.01:
+        raise DataValidationError("Yahoo market price and daily close disagree")
+
+    flags: list[str] = []
+    split_factor = _split_factor(result, after=reference_at, through=current_bar_time)
+    if split_factor != 1.0:
+        adjusted_previous = previous / split_factor
+        raw_gap = abs(current_bar / previous - 1)
+        adjusted_gap = abs(current_bar / adjusted_previous - 1)
+        if adjusted_gap < raw_gap and adjusted_gap <= 0.4:
+            previous = adjusted_previous
+            flags.append(f"주식 분할 반영 {split_factor:g}:1")
+        else:
+            flags.append(f"주식 분할 확인 · 일봉 이미 보정 {split_factor:g}:1")
+    return previous, reference_at, flags
 
 
 def fetch_yahoo_quote(
@@ -178,30 +293,57 @@ def fetch_yahoo_quote(
     definition: dict[str, str],
     settings: Settings,
 ) -> AssetQuote:
-    symbol = url_quote(definition["symbol"], safe="")
+    symbol_raw = definition["symbol"]
+    symbol = url_quote(symbol_raw, safe="")
     response = request(
         "GET",
         YAHOO_CHART_URL.format(symbol=symbol),
         settings,
         provider="yahoo",
-        params={"range": "5d", "interval": "1d", "includePrePost": "true"},
+        params={
+            "range": "10d",
+            "interval": "1d",
+            "includePrePost": "true",
+            "events": "div,splits",
+        },
         session=_session(),
     )
     result = response.json()["chart"]["result"][0]
     meta = result["meta"]
     current_raw = meta.get("regularMarketPrice")
-    previous_raw = meta.get("chartPreviousClose") or meta.get("previousClose")
     if current_raw is None:
         closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         current_raw = next((value for value in reversed(closes) if value is not None), None)
-    if current_raw is None:
-        raise RuntimeError(f"Yahoo returned no current price for {definition['symbol']}")
-    current = float(current_raw)
-    previous = float(previous_raw) if previous_raw not in {None, 0} else None
-    absolute, percent = _changes(current, previous)
+    current = _finite_positive(current_raw, field="current price")
     timestamp = int(meta.get("regularMarketTime") or datetime.now(UTC).timestamp())
     as_of = datetime.fromtimestamp(timestamp, UTC)
-    market_state = str(meta.get("marketState") or "CLOSED")
+    timezone_info = _exchange_timezone(meta)
+    market_state = str(meta.get("marketState") or "CLOSED").upper()
+    precheck_flags: list[str] = []
+    daily_bars = _completed_daily_bars(result, timezone_info)
+    if daily_bars:
+        latest_bar_time, latest_bar_close = daily_bars[-1]
+        same_session = (
+            latest_bar_time.astimezone(timezone_info).date()
+            == as_of.astimezone(timezone_info).date()
+        )
+        market_gap = abs(current - latest_bar_close) / current
+        if market_state != "REGULAR" and same_session and market_gap > 0.01:
+            current = latest_bar_close
+            precheck_flags.append("Yahoo 완료 일봉 종가 사용")
+    previous, reference_at, flags = _yahoo_reference_close(
+        result,
+        current=current,
+        as_of=as_of,
+        timezone_info=timezone_info,
+    )
+    flags = precheck_flags + flags
+    absolute, percent = _changes(current, previous)
+    if definition["kind"] == "equity" and percent is not None and abs(percent) > 40:
+        raise DataValidationError("unconfirmed equity price discontinuity")
+    price_basis = "regular_market" if market_state == "REGULAR" else "regular_close"
+    if definition["kind"] == "commodity":
+        flags.append(f"연속 선물 {symbol_raw}")
     return AssetQuote(
         key=key,
         name_ko=definition["name"],
@@ -216,6 +358,98 @@ def fetch_yahoo_quote(
         comparison_label="전일 종가",
         stale=_is_stale(as_of, definition["kind"], market_state),
         unit=definition["unit"],
+        quality_flags=flags,
+        reference_at=reference_at,
+        symbol=symbol_raw,
+        currency=str(meta.get("currency") or definition["unit"]),
+        price_basis=price_basis,
+        validation_status="verified",
+        validation_sources=["Yahoo Finance 일봉"],
+        calculation_version=CALCULATION_VERSION,
+    )
+
+
+def fetch_naver_korea_quote(
+    key: str,
+    definition: dict[str, str],
+    settings: Settings,
+) -> AssetQuote:
+    asset_type, symbol = KOREA_ASSETS[key]
+    response = request(
+        "GET",
+        NAVER_REALTIME_URL.format(asset_type=asset_type, symbol=symbol),
+        settings,
+        provider="naver_finance",
+        session=_session(),
+    )
+    payload = response.json()
+    items = payload.get("datas") or []
+    if not items:
+        raise DataValidationError(f"Naver returned no data for {symbol}")
+    item = items[0]
+    current = _finite_positive(item.get("closePriceRaw"), field="Naver current price")
+    change = float(item.get("compareToPreviousClosePriceRaw") or 0)
+    previous = current - change
+    previous = _finite_positive(previous, field="Naver previous close")
+    absolute, percent = _changes(current, previous)
+    reported_percent = float(item.get("fluctuationsRatioRaw") or 0)
+    if percent is None or abs(percent - reported_percent) > 0.05:
+        raise DataValidationError("Naver change fields are internally inconsistent")
+    raw_as_of = str(item.get("localTradedAt") or "")
+    try:
+        as_of = datetime.fromisoformat(raw_as_of).astimezone(KST)
+    except ValueError as exc:
+        raise DataValidationError("Naver returned invalid market timestamp") from exc
+    market_state = str(item.get("marketStatus") or "UNKNOWN").upper()
+    if market_state == "CLOSE":
+        as_of = datetime.combine(as_of.date(), time(15, 30), tzinfo=KST)
+    return AssetQuote(
+        key=key,
+        name_ko=definition["name"],
+        kind=definition["kind"],  # type: ignore[arg-type]
+        current=current,
+        previous=previous,
+        absolute_change=absolute,
+        percent_change=percent,
+        as_of=as_of,
+        market_state=market_state,
+        source="Naver Finance",
+        comparison_label="전일 종가",
+        stale=_is_stale(as_of, definition["kind"], market_state),
+        unit=definition["unit"],
+        symbol=symbol,
+        currency="KRW",
+        price_basis="regular_close" if market_state == "CLOSE" else "regular_market",
+        validation_status="verified",
+        validation_sources=["Naver Finance"],
+        calculation_version=CALCULATION_VERSION,
+    )
+
+
+def fetch_verified_korea_quote(
+    key: str,
+    definition: dict[str, str],
+    settings: Settings,
+) -> AssetQuote:
+    naver = fetch_naver_korea_quote(key, definition, settings)
+    yahoo = fetch_yahoo_quote(key, definition, settings)
+    if naver.as_of.astimezone(KST).date() != yahoo.as_of.astimezone(KST).date():
+        raise DataValidationError("Naver and Yahoo session dates disagree")
+    price_gap = abs(naver.current - yahoo.current) / naver.current * 100
+    naver_percent = float(naver.percent_change or 0)
+    yahoo_percent = float(yahoo.percent_change or 0)
+    percent_gap = abs(naver_percent - yahoo_percent)
+    if price_gap > 0.3 or percent_gap > 0.15:
+        raise DataValidationError(
+            f"Naver/Yahoo mismatch: price={price_gap:.3f}% change={percent_gap:.3f}pp"
+        )
+    return naver.model_copy(
+        update={
+            "source": "Naver Finance · Yahoo 검증",
+            "reference_at": yahoo.reference_at,
+            "validation_sources": ["Naver Finance", "Yahoo Finance 일봉"],
+            "quality_flags": ["Naver/Yahoo 일치"],
+        }
     )
 
 
@@ -350,6 +584,12 @@ def btc_quote_from_series(series: PriceSeries) -> AssetQuote:
         comparison_label="24시간 전",
         stale=_is_stale(as_of, "crypto", "OPEN"),
         unit="USD",
+        reference_at=series.points[0].timestamp,
+        symbol="BTC-USD",
+        currency="USD",
+        price_basis="24h",
+        validation_sources=[series.source],
+        calculation_version=CALCULATION_VERSION,
     )
 
 
@@ -397,6 +637,11 @@ def fetch_fmp_quote(
             comparison_label="전일 종가",
             stale=_is_stale(as_of, definition["kind"], market_state),
             unit=definition["unit"],
+            symbol=symbol,
+            currency=definition["unit"],
+            price_basis="regular_close" if market_state == "CLOSED" else "regular_market",
+            validation_sources=["Financial Modeling Prep"],
+            calculation_version=CALCULATION_VERSION,
         )
     except Exception:
         logging.warning("FMP quote failed for %s; using Yahoo fallback.", key, exc_info=True)
@@ -412,10 +657,16 @@ def _quote_ttl_seconds(quote: AssetQuote) -> int:
 
 
 def _cache_quote(store: StateStore | None, quote: AssetQuote) -> None:
-    if store is None or quote.stale:
+    if (
+        store is None
+        or quote.stale
+        or not quote.verified
+        or quote.validation_status != "verified"
+        or quote.calculation_version != CALCULATION_VERSION
+    ):
         return
     store.cache_set(
-        f"quote:{quote.key}",
+        f"quote:v{CALCULATION_VERSION}:{quote.key}",
         quote.model_dump(mode="json"),
         source=quote.source,
         ttl_seconds=_quote_ttl_seconds(quote),
@@ -426,13 +677,13 @@ def _cached_quote(
     store: StateStore | None,
     key: str,
     *,
-    max_stale_seconds: int = 4 * 24 * 60 * 60,
+    max_stale_seconds: int | None = None,
 ) -> AssetQuote | None:
     if store is None:
         return None
     cached = store.cache_get(
-        f"quote:{key}",
-        max_stale_seconds=max_stale_seconds,
+        f"quote:v{CALCULATION_VERSION}:{key}",
+        max_stale_seconds=7 * 24 * 60 * 60,
     )
     if not cached or not isinstance(cached.get("payload"), dict):
         return None
@@ -440,14 +691,28 @@ def _cached_quote(
         quote = AssetQuote.model_validate(cached["payload"])
     except Exception:
         return None
+    if quote.calculation_version != CALCULATION_VERSION:
+        return None
+    if max_stale_seconds is None:
+        if quote.kind == "crypto" or quote.market_state.upper() in {"OPEN", "REGULAR"}:
+            max_stale_seconds = 60 * 60
+        elif quote.kind == "yield":
+            max_stale_seconds = 7 * 24 * 60 * 60
+        else:
+            max_stale_seconds = 4 * 24 * 60 * 60
+    if datetime.now(UTC) - quote.as_of.astimezone(UTC) > timedelta(
+        seconds=max_stale_seconds
+    ):
+        return None
     flags = list(quote.quality_flags)
     if "cached" not in flags:
         flags.append("cached")
     return quote.model_copy(
         update={
-            "source": f"{quote.source} · 마지막 정상값",
-            "stale": bool(cached["stale"]),
+            "source": f"{quote.source} · 마지막 검증값",
+            "stale": False,
             "quality_flags": flags,
+            "validation_status": "last_verified",
         }
     )
 
@@ -479,12 +744,15 @@ def fetch_asset_quote(
             quote.comparison_label = "직전 UTC 종가"
         elif key in YAHOO_ASSETS or key in SESSION_ASSETS:
             definition = YAHOO_ASSETS.get(key) or SESSION_ASSETS[key]
-            fmp_symbol = FMP_SYMBOLS.get(key)
-            quote = (
-                fetch_fmp_quote(key, fmp_symbol, definition, settings)
-                if fmp_symbol
-                else None
-            ) or fetch_yahoo_quote(key, definition, settings)
+            if key in KOREA_ASSETS:
+                quote = fetch_verified_korea_quote(key, definition, settings)
+            else:
+                fmp_symbol = FMP_SYMBOLS.get(key)
+                quote = (
+                    fetch_fmp_quote(key, fmp_symbol, definition, settings)
+                    if fmp_symbol
+                    else None
+                ) or fetch_yahoo_quote(key, definition, settings)
         elif key in {"us2y", "us10y"}:
             try:
                 quote = fetch_treasury_quotes(settings)[key]
@@ -540,6 +808,8 @@ def fetch_market_quotes(
                     quotes[key] = cached
 
     def fetch_one(key: str, definition: dict[str, str]) -> AssetQuote:
+        if key in KOREA_ASSETS:
+            return fetch_verified_korea_quote(key, definition, settings)
         fmp_symbol = FMP_SYMBOLS.get(key)
         if fmp_symbol:
             fmp_quote = fetch_fmp_quote(key, fmp_symbol, definition, settings)
@@ -598,6 +868,7 @@ def fetch_market_quotes(
                     quotes[key] = cached
 
     _verify_outlier_directions(quotes, settings, errors)
+    record_data_quality(store, quotes, errors)
     return quotes, errors
 
 
@@ -662,6 +933,16 @@ def fetch_treasury_quotes(settings: Settings) -> dict[str, AssetQuote]:
             comparison_label="직전 고시",
             stale=datetime.now(KST) - as_of > timedelta(days=7),
             unit="%",
+            reference_at=datetime.combine(
+                date.fromisoformat(previous_row["NEW_DATE"][:10]),
+                time(17, 0),
+                tzinfo=KST,
+            ),
+            symbol=field,
+            currency="%",
+            price_basis="official_daily",
+            validation_sources=["U.S. Department of the Treasury"],
+            calculation_version=CALCULATION_VERSION,
         )
     return {key: value for key, value in result.items() if not value.stale}
 
@@ -714,6 +995,16 @@ def fetch_fred_treasury_quotes(settings: Settings) -> dict[str, AssetQuote]:
             comparison_label="직전 고시",
             stale=datetime.now(KST) - as_of > timedelta(days=7),
             unit="%",
+            reference_at=datetime.combine(
+                date.fromisoformat(previous_row["date"][:10]),
+                time(17, 0),
+                tzinfo=KST,
+            ),
+            symbol=field,
+            currency="%",
+            price_basis="official_daily",
+            validation_sources=["FRED"],
+            calculation_version=CALCULATION_VERSION,
         )
     return {key: quote for key, quote in result.items() if not quote.stale}
 
@@ -737,6 +1028,9 @@ def _verify_outlier_directions(
         if quote is None or quote.percent_change is None:
             continue
         if abs(quote.percent_change) < threshold:
+            continue
+        if len(quote.validation_sources) >= 2:
+            quote.quality_flags.append("독립 공급원 수치 교차검증")
             continue
         try:
             if key in YAHOO_CRYPTO_ASSETS and quote.source != "Yahoo Finance":
@@ -808,10 +1102,20 @@ def critical_data_errors(quotes: dict[str, AssetQuote]) -> list[str]:
         "dxy": "DXY",
     }.items():
         quote = quotes.get(key)
-        if quote is None or quote.stale or not quote.verified:
+        if (
+            quote is None
+            or quote.stale
+            or not quote.verified
+            or quote.validation_status == "rejected"
+            or quote.calculation_version < 2
+        ):
             missing.append(label)
     if not any(
-        key in quotes and not quotes[key].stale and quotes[key].verified
+        key in quotes
+        and not quotes[key].stale
+        and quotes[key].verified
+        and quotes[key].validation_status != "rejected"
+        and quotes[key].calculation_version >= 2
         for key in ("us2y", "us10y")
     ):
         missing.append("미국채 금리")
@@ -828,3 +1132,63 @@ def provider_health_summary(
         "errors": errors,
         "sources": sorted({quote.source for quote in quotes.values()}),
     }
+
+
+def record_data_quality(
+    store: StateStore | None,
+    quotes: dict[str, AssetQuote],
+    errors: list[str],
+) -> dict[str, Any]:
+    existing_assets: dict[str, Any] = {}
+    if store is not None:
+        previous = store.runtime_state("data_quality")
+        if isinstance(previous.get("assets"), dict):
+            existing_assets = dict(previous["assets"])
+    current_assets = {
+        key: {
+            "name": quote.name_ko,
+            "current": quote.current,
+            "previous": quote.previous,
+            "percent_change": quote.percent_change,
+            "as_of": quote.as_of.isoformat(),
+            "reference_at": quote.reference_at.isoformat() if quote.reference_at else None,
+            "source": quote.source,
+            "status": quote.validation_status,
+            "sources": quote.validation_sources,
+            "price_basis": quote.price_basis,
+        }
+        for key, quote in quotes.items()
+    }
+    existing_assets.update(current_assets)
+    known_keys = set(YAHOO_ASSETS) | set(YAHOO_CRYPTO_ASSETS) | set(SESSION_ASSETS) | {
+        "btc", "eth", "us2y", "us10y"
+    }
+    for error in errors:
+        key = str(error).split(":", 1)[0]
+        if key not in known_keys or key in current_assets:
+            continue
+        prior = dict(existing_assets.get(key) or {})
+        prior.update({"name": prior.get("name") or key, "status": "rejected", "error": error})
+        existing_assets[key] = prior
+    payload = {
+        "checked_at": datetime.now(UTC).isoformat(),
+        "calculation_version": CALCULATION_VERSION,
+        "assets": existing_assets,
+        "errors": errors[:20],
+    }
+    if store is not None:
+        store.set_runtime_state("data_quality", payload)
+    return payload
+
+
+def audit_market_data(
+    settings: Settings,
+    store: StateStore,
+) -> dict[str, Any]:
+    quotes, errors = fetch_market_quotes(settings, store)
+    for key in SESSION_ASSETS:
+        try:
+            quotes[key] = fetch_asset_quote(key, settings, store)
+        except Exception as exc:
+            errors.append(f"{key}: {type(exc).__name__}")
+    return record_data_quality(store, quotes, errors)

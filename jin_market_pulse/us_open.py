@@ -238,7 +238,12 @@ def build_us_open_preview(
     for key in US_OPEN_KEYS:
         try:
             quote = fetch_asset_quote(key, settings, state)
-            if quote.verified and not quote.stale:
+            if (
+                quote.verified
+                and not quote.stale
+                and quote.validation_status == "verified"
+                and quote.calculation_version >= 2
+            ):
                 quotes[key] = quote
         except Exception:
             continue

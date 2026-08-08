@@ -14,6 +14,7 @@ from .news import fetch_news, verified_topic_groups
 from .providers import (
     fetch_asset_quote,
     fetch_intraday_series,
+    record_data_quality,
     verify_outlier_directions,
 )
 from .state import StateStore
@@ -96,9 +97,14 @@ def _move_line(quote: AssetQuote) -> str:
     if percent is not None:
         arrow = "▲" if percent > 0 else "▼" if percent < 0 else "▬"
         change = f"{abs(percent):.2f}%"
+    fallback = (
+        f" · 마지막 검증값 {quote.as_of.astimezone(KST):%m/%d %H:%M}"
+        if quote.validation_status == "last_verified"
+        else ""
+    )
     return (
         f"• {html.escape(ASSET_LABELS.get(quote.key, quote.name_ko))} "
-        f"<b>{html.escape(_format_value(quote))}</b> {arrow}{change}"
+        f"<b>{html.escape(_format_value(quote))}</b> {arrow}{change}{fallback}"
     )
 
 
@@ -202,13 +208,16 @@ def _fact_rows(
 ) -> list[dict[str, Any]]:
     facts = [
         {
-            "fact_key": f"asset:{key}",
+            "fact_key": f"asset:v2:{key}",
             "numeric_value": quote.percent_change,
             "direction": _direction(quote.percent_change),
             "official": False,
         }
         for key, quote in quotes.items()
         if quote.percent_change is not None
+        and quote.validation_status == "verified"
+        and quote.calculation_version >= 2
+        and not quote.stale
     ]
     for group in news_groups:
         facts.append(
@@ -254,6 +263,9 @@ def _headline(quotes: dict[str, AssetQuote], core: tuple[str, ...]) -> str:
             quote
             for key in core
             if (quote := quotes.get(key)) and quote.percent_change is not None
+            and quote.validation_status == "verified"
+            and quote.calculation_version >= 2
+            and not quote.stale
         ),
         key=lambda quote: abs(float(quote.percent_change or 0)),
         reverse=True,
@@ -328,6 +340,9 @@ def render_session_report(
             quotes[key]
             for key in {asset for item in group for asset in item.relevant_asset_keys}
             if key in quotes and quotes[key].percent_change is not None
+            and quotes[key].validation_status == "verified"
+            and quotes[key].calculation_version >= 2
+            and not quotes[key].stale
         ]
         if related:
             reaction = max(
@@ -347,7 +362,10 @@ def render_session_report(
     changed_assets = [
         quote
         for quote in core_quotes + context_quotes
-        if f"asset:{quote.key}" in novel_keys
+        if f"asset:v2:{quote.key}" in novel_keys
+        and quote.validation_status == "verified"
+        and quote.calculation_version >= 2
+        and not quote.stale
     ]
     lines.extend(["", "<b>앞선 보고 이후 달라진 점</b>"])
     if changed_assets:
@@ -449,6 +467,7 @@ def build_session_report(
         for key, quote in quotes.items()
         if quote.verified and not quote.stale
     }
+    record_data_quality(state, quotes, errors)
 
     anchor = quotes.get(spec["core"][0])
     if not anchor:

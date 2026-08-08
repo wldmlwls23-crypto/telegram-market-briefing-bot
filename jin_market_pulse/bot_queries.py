@@ -413,7 +413,7 @@ def _format_number(value: float, unit: str = "") -> str:
 
 def _market_state_ko(state: str) -> str:
     normalized = state.upper()
-    if normalized == "OPEN":
+    if normalized in {"OPEN", "REGULAR"}:
         return "거래 중"
     if normalized == "PRE":
         return "장전"
@@ -441,13 +441,18 @@ def _quote_html(quote: AssetQuote, *, compact: bool = False) -> str:
     if quote.previous is not None:
         previous = (
             f"\n{html.escape(quote.comparison_label)} "
-            f"{html.escape(_format_number(quote.previous, display_unit))}"
+            f"{html.escape(_format_number(quote.previous, display_unit))} → 현재 "
+            f"{html.escape(current)}"
         )
     flags = ""
     if quote.proxy:
         flags = "\n대용 자산 값"
+    elif quote.validation_status == "last_verified":
+        flags = (
+            f"\n마지막 검증값 · {quote.as_of.astimezone(KST):%m/%d %H:%M} KST"
+        )
     elif quote.stale:
-        flags = "\n마지막 정상값"
+        flags = "\n오래된 값"
     return (
         f"{first}{previous}"
         f"\n기준 {quote.as_of.astimezone(KST):%m/%d %H:%M} KST · "
@@ -751,6 +756,9 @@ def _data_only_cause(target: AssetQuote, quotes: dict[str, AssetQuote]) -> str:
         and quote.key != target.key
         and quote.percent_change is not None
         and quote.verified
+        and not quote.stale
+        and quote.validation_status == "verified"
+        and quote.calculation_version >= 2
     ][:4]
     lines.extend(_quote_html(quote, compact=True) for quote in peers)
     lines.extend(
@@ -771,6 +779,18 @@ def _current_move_or_limit(
     quotes, _ = fetch_market_quotes(settings)
     target = quotes.get(key) or fetch_asset_quote(key, settings)
     quotes[key] = target
+    if (
+        target.stale
+        or not target.verified
+        or target.validation_status != "verified"
+        or target.calculation_version < 2
+    ):
+        return (
+            f"<b>{html.escape(target.name_ko)} 원인 분석 보류</b>\n"
+            f"{_quote_html(target, compact=True)}\n\n"
+            "현재 검증된 신규 시세가 없어 마지막 정상값만 표시했습니다. "
+            "이 값은 급변 판단이나 원인 분석에 사용하지 않습니다."
+        )
     if not settings.enable_ai_advisor or store is None:
         return _data_only_cause(target, quotes)
     if not store.claim_usage_slot(
@@ -1002,12 +1022,50 @@ def _status(settings: Settings, store: StateStore | None) -> str:
     usage = store.usage_summary()
     used = sum(usage.values())
     lines.append(f"AI 질문 잔여: {max(settings.ai_advisor_daily_limit - used, 0)}회")
+    quality = store.runtime_state("data_quality")
+    assets = quality.get("assets") if isinstance(quality.get("assets"), dict) else {}
+    korea_keys = ("kospi", "kosdaq", "samsung", "skhynix")
+    korea = [assets[key] for key in korea_keys if key in assets]
+    korea_fallback = [
+        str(item.get("name") or "한국 자산")
+        for item in korea
+        if item.get("status") == "last_verified"
+    ]
+    if korea_fallback:
+        lines.append(
+            "한국 시장 데이터: 마지막 검증값 사용 · "
+            + html.escape("·".join(korea_fallback))
+        )
+    elif len(korea) == len(korea_keys) and all(
+        len(item.get("sources") or []) >= 2 for item in korea
+    ):
+        lines.append("한국 시장 데이터: 정상 · Naver/Yahoo 일치")
+    elif korea:
+        lines.append("한국 시장 데이터: 일부 자산 검증 대기")
+    us_indices = [assets[key] for key in ("sp500", "nasdaq100", "dow") if key in assets]
+    if us_indices:
+        latest_us = max(
+            datetime.fromisoformat(str(item["as_of"])) for item in us_indices
+        ).astimezone(KST)
+        lines.append(f"미국 지수: 정상 · 최근 검증 {latest_us:%m/%d %H:%M} KST")
     unhealthy = [
         item
         for item in store.provider_health()
         if int(item["consecutive_failures"]) >= 3
     ]
-    lines.append(f"데이터 공급원: {'일부 장애' if unhealthy else '정상'}")
+    if unhealthy:
+        provider_names = "·".join(
+            {
+                "economic_calendar": "경제 캘린더",
+                "CoinGecko": "CoinGecko",
+                "Yahoo Finance": "Yahoo Finance",
+                "market_data": "시장 데이터",
+            }.get(str(item["provider"]), str(item["provider"]))
+            for item in unhealthy[:3]
+        )
+        lines.append(f"데이터 공급원: 지연 · {html.escape(provider_names)}")
+    else:
+        lines.append("데이터 공급원: 정상")
     scan = store.runtime_state("breaking_scan")
     if scan.get("checked_at"):
         checked = datetime.fromisoformat(scan["checked_at"]).astimezone(KST)
