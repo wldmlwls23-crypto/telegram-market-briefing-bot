@@ -10,7 +10,7 @@ for (const [name, file] of [
   ["market-pulse-cron", "railway.cron.json"],
 ]) {
   const service = resources.find(resource => resource.name === name);
-  const legacy = JSON.parse(readFileSync(new URL("../" + file, import.meta.url)));
+  const legacy = JSON.parse(readFileSync(new URL("../tests/fixtures/" + file, import.meta.url)));
   for (const section of ["build", "deploy"]) {
     for (const [key, value] of Object.entries(legacy[section])) {
       assert.deepEqual(service[section][key], value, name + "." + section + "." + key);

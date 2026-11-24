@@ -433,6 +433,6 @@ def test_close_and_overnight_settings_are_independent(settings, tmp_path):
 
 
 def test_cron_runs_every_fifteen_minutes():
-    config = json.loads(open("railway.cron.json", encoding="utf-8").read())
+    config = json.loads(open("tests/fixtures/railway.cron.json", encoding="utf-8").read())
 
     assert config["deploy"]["cronSchedule"] == "5,20,35,50 * * * *"

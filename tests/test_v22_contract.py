@@ -313,7 +313,7 @@ def test_job_and_delivery_idempotency(tmp_path):
 
 def test_railway_and_python_runtime_are_pinned():
     root = Path(__file__).parents[1]
-    railway = json.loads((root / "railway.json").read_text(encoding="utf-8"))
+    railway = json.loads((root / "tests/fixtures/railway.json").read_text(encoding="utf-8"))
 
     assert railway["build"]["builder"] == "RAILPACK"
     assert railway["deploy"]["healthcheckPath"] == "/health"
@@ -328,7 +328,7 @@ def test_railway_and_python_runtime_are_pinned():
 def test_railway_cron_has_bounded_schedule_and_runtime():
     root = Path(__file__).parents[1]
     config = json.loads(
-        (root / "railway.cron.json").read_text(encoding="utf-8")
+        (root / "tests/fixtures/railway.cron.json").read_text(encoding="utf-8")
     )
     deploy = config["deploy"]
 
