@@ -15,3 +15,5 @@ media-temp/
 *.rar
 *.log
 .pytest_cache/
+node_modules/
+.railway/.cac-migration.json
